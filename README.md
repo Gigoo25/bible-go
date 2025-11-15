@@ -11,7 +11,9 @@ A terminal-based Bible reader built with Go and Bubble Tea.
 
 ## Usage
 
-The app automatically loads Bible translations from the `bible-data/` directory within the project. Each translation is stored as a JSON file (e.g., `ESV_bible.json`, `KJV_bible.json`).
+The app automatically loads Bible translations from the `~/.config/bible-go/translations/` directory. Each translation is stored as a JSON file (e.g., `ESV_bible.json`, `KJV_bible.json`).
+
+**Note**: Bible translation files are not included in this repository due to copyright restrictions. You can obtain them from [jadenzaleski/bible-translations](https://github.com/jadenzaleski/bible-translations) and place them in `~/.config/bible-go/translations/`.
 
 **Performance Note**: The app uses lazy loading - only the current translation is loaded at startup for fast startup times. Other translations are loaded on-demand when you switch to them.
 
@@ -54,4 +56,4 @@ The `-ldflags="-s -w"` flags strip debug symbols for a smaller binary size.
 ./bible-go
 ```
 
-Ensure the `bible-data/` directory exists in the project root with Bible translation JSON files.
+Ensure the `~/.config/bible-go/translations/` directory exists with Bible translation JSON files.

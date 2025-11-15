@@ -126,6 +126,18 @@ func sortMapKeysAsInts[T any](m map[string]T) []int {
 	return numbers
 }
 
+func getConfigDir() (string, error) {
+	configDir := os.Getenv("XDG_CONFIG_HOME")
+	if configDir == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		configDir = filepath.Join(homeDir, ".config")
+	}
+	return filepath.Join(configDir, "bible-go"), nil
+}
+
 func NewMultiBibleData() (*MultiBibleData, error) {
 	mbd := &MultiBibleData{
 		translations:     make(map[string]*BibleData),
@@ -133,13 +145,18 @@ func NewMultiBibleData() (*MultiBibleData, error) {
 		filePaths:        make(map[string]string),
 	}
 
-	files, err := filepath.Glob("bible-data/*_bible.json")
+	configDir, err := getConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get config dir: %w", err)
+	}
+	translationsDir := filepath.Join(configDir, "translations")
+	files, err := filepath.Glob(filepath.Join(translationsDir, "*_bible.json"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to glob bible files: %w", err)
 	}
 
 	if len(files) == 0 {
-		return nil, fmt.Errorf("no bible JSON files found (expected files like ESV_bible.json)")
+		return nil, fmt.Errorf("no bible JSON files found in %s (expected files like ESV_bible.json)", translationsDir)
 	}
 
 	for _, file := range files {
