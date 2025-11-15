@@ -24,6 +24,10 @@ type model struct {
 	scrollOffset       int
 	height             int
 	width              int
+	config             Config
+	bookStyle          lipgloss.Style
+	verseNumStyle      lipgloss.Style
+	textStyle          lipgloss.Style
 }
 
 type mode int
@@ -41,28 +45,40 @@ type AppState struct {
 	ScrollOffset       int    `json:"scrollOffset"`
 }
 
+type Config struct {
+	HighlightColor string `json:"highlightColor"`
+	VerseNumColor  string `json:"verseNumColor"`
+	TextColor      string `json:"textColor"`
+}
+
 const (
-	configDir = "bible-go"
-	stateFile = "state.json"
+	configDir  = "bible-go"
+	stateFile  = "state.json"
+	configFile = "config.json"
 )
 
 func getConfigPath() (string, error) {
-	configDir := os.Getenv("XDG_CONFIG_HOME")
-	if configDir == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		configDir = filepath.Join(homeDir, ".config")
-	}
-
-	configPath := filepath.Join(configDir, "bible-go")
-	err := os.MkdirAll(configPath, 0o755)
+	configDir, err := getConfigDir()
 	if err != nil {
 		return "", err
 	}
+	err = os.MkdirAll(configDir, 0o755)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configDir, stateFile), nil
+}
 
-	return filepath.Join(configPath, stateFile), nil
+func getConfigFilePath() (string, error) {
+	configDir, err := getConfigDir()
+	if err != nil {
+		return "", err
+	}
+	err = os.MkdirAll(configDir, 0o755)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configDir, configFile), nil
 }
 
 func saveState(state AppState) error {
@@ -106,33 +122,50 @@ func getDefaultAppState() AppState {
 	}
 }
 
+func saveConfig(config Config) error {
+	configPath, err := getConfigFilePath()
+	if err != nil {
+		return err
+	}
+
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(configPath, data, 0o644)
+}
+
+func loadConfig() (Config, error) {
+	config := getDefaultConfig()
+
+	configPath, err := getConfigFilePath()
+	if err != nil {
+		return config, nil
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		// File doesn't exist, create it with default config
+		saveConfig(config)
+		return config, nil
+	}
+
+	err = json.Unmarshal(data, &config)
+	return config, err
+}
+
+func getDefaultConfig() Config {
+	return Config{
+		HighlightColor: "#cba6f7",
+		VerseNumColor:  "#89b4fa",
+		TextColor:      "#cdd6f4",
+	}
+}
+
 var (
-	titleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("15")).
-			PaddingLeft(1).
-			PaddingRight(1).
-			Background(lipgloss.Color("236"))
-
-	bookStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("220"))
-
 	verseStyle = lipgloss.NewStyle().
 			MarginBottom(2)
-
-	cursorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("220")).
-			Bold(true)
-
-	verseNumStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("242")).
-			Bold(true)
-
-	searchStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("244")).
-			Italic(true).
-			MarginBottom(1)
 
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("244")).
@@ -150,6 +183,11 @@ func initialModel() tea.Model {
 	if err != nil {
 		savedState = getDefaultAppState()
 		savedState.CurrentBook = "Genesis"
+	}
+
+	config, err := loadConfig()
+	if err != nil {
+		config = getDefaultConfig()
 	}
 
 	if savedState.CurrentTranslation == "" || !contains(multiBibleData.translationNames, savedState.CurrentTranslation) {
@@ -185,6 +223,10 @@ func initialModel() tea.Model {
 		scrollOffset:       savedState.ScrollOffset,
 		height:             24,
 		width:              80,
+		config:             config,
+		bookStyle:          lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(config.HighlightColor)),
+		verseNumStyle:      lipgloss.NewStyle().Foreground(lipgloss.Color(config.VerseNumColor)).Bold(true),
+		textStyle:          lipgloss.NewStyle().Foreground(lipgloss.Color(config.TextColor)),
 	}
 }
 
@@ -560,27 +602,19 @@ func (m model) View() string {
 	var content strings.Builder
 
 	if m.mode == navigationMode {
-		content.WriteString(bookStyle.Render(fmt.Sprintf("%s %s %d", m.currentTranslation, m.currentBook, m.currentChapter)))
+		content.WriteString(m.bookStyle.Render(fmt.Sprintf("%s %s %d", m.currentTranslation, m.currentBook, m.currentChapter)))
 		content.WriteString("\n\n")
 
 		visibleVerses := m.getVisibleVerses()
-		end := m.scrollOffset + visibleVerses
-		if end > len(m.verses) {
-			end = len(m.verses)
-		}
-
 		m.adjustScrollOffset(len(m.verses), visibleVerses)
-		end = m.scrollOffset + visibleVerses
-		if end > len(m.verses) {
-			end = len(m.verses)
-		}
+		end := min(len(m.verses), m.scrollOffset+visibleVerses)
 
 		linesUsed := 0
 		linesUsed += 3
 
 		for i := m.scrollOffset; i < end; i++ {
 			verse := m.verses[i]
-			verseNumStr := verseNumStyle.Render(fmt.Sprintf("%3d", verse.Verse))
+			verseNumStr := m.verseNumStyle.Render(fmt.Sprintf("%3d", verse.Verse))
 			paddingWidth := 6
 
 			lineCount := m.renderVerse(&content, verse, i == m.selected, verseNumStr, paddingWidth)
@@ -593,7 +627,7 @@ func (m model) View() string {
 		}
 	} else {
 		if len(m.searchResults) > 0 {
-			content.WriteString(bookStyle.Render(fmt.Sprintf("Search: %s (%d results)", m.searchQuery, len(m.searchResults))))
+			content.WriteString(m.bookStyle.Render(fmt.Sprintf("Search: %s (%d results)", m.searchQuery, len(m.searchResults))))
 			content.WriteString("\n\n")
 
 			availableHeight := m.height - 6
@@ -628,16 +662,13 @@ func (m model) View() string {
 				_, visibleCount = m.calculateVisibleSearchResults(availableHeight)
 			}
 
-			end := m.scrollOffset + visibleCount
-			if end > len(m.searchResults) {
-				end = len(m.searchResults)
-			}
+			end := min(len(m.searchResults), m.scrollOffset+visibleCount)
 
 			actualLinesUsed := 0
 			for i := m.scrollOffset; i < end; i++ {
 				result := m.searchResults[i]
 				reference := truncateText(fmt.Sprintf("%s %d:%d", result.Book, result.Chapter, result.Verse), 20)
-				verseNumStr := verseNumStyle.Render(fmt.Sprintf("%-20s", reference))
+				verseNumStr := m.verseNumStyle.Render(fmt.Sprintf("%-20s", reference))
 				paddingWidth := 23
 
 				lineCount := m.renderVerse(&content, result, i == m.selected, verseNumStr, paddingWidth)
@@ -649,7 +680,7 @@ func (m model) View() string {
 				content.WriteString(strings.Repeat("\n", remainingLines))
 			}
 		} else {
-			content.WriteString(bookStyle.Render(fmt.Sprintf("Search: %s", m.searchQuery)))
+			content.WriteString(m.bookStyle.Render(fmt.Sprintf("Search: %s", m.searchQuery)))
 			content.WriteString("\n\n")
 
 			if m.searchQuery != "" {
@@ -770,6 +801,9 @@ func wrapVerseText(text string, maxWidth int) []string {
 
 func (m model) renderVerse(content *strings.Builder, verse Verse, isSelected bool, verseNumStr string, paddingWidth int) int {
 	if isSelected {
+		cursorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color(m.config.HighlightColor)).
+			Bold(true)
 		content.WriteString(cursorStyle.Render(">"))
 	} else {
 		content.WriteString(" ")
@@ -782,7 +816,7 @@ func (m model) renderVerse(content *strings.Builder, verse Verse, isSelected boo
 	verseLines := wrapVerseText(verse.Text, textWidth)
 
 	if len(verseLines) > 0 {
-		content.WriteString(verseLines[0])
+		content.WriteString(m.textStyle.Render(verseLines[0]))
 	}
 	content.WriteByte('\n')
 	linesUsed := 1
@@ -790,7 +824,7 @@ func (m model) renderVerse(content *strings.Builder, verse Verse, isSelected boo
 	padding := strings.Repeat(" ", paddingWidth)
 	for _, line := range verseLines[1:] {
 		content.WriteString(padding)
-		content.WriteString(line)
+		content.WriteString(m.textStyle.Render(line))
 		content.WriteByte('\n')
 		linesUsed++
 	}

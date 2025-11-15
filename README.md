@@ -13,6 +13,18 @@ A terminal-based Bible reader built with Go and Bubble Tea.
 
 The app automatically loads Bible translations from the `~/.config/bible-go/translations/` directory. Each translation is stored as a JSON file (e.g., `ESV_bible.json`, `KJV_bible.json`).
 
+Configuration can be customized by editing `~/.config/bible-go/config.json`. The default configuration is:
+```json
+{
+  "highlightColor": "#cba6f7",
+  "verseNumColor": "#89b4fa",
+  "textColor": "#cdd6f4"
+}
+```
+- `highlightColor`: Hex color for the selected verse cursor (">") and book/chapter headers
+- `verseNumColor`: Hex color for verse numbers and search result references
+- `textColor`: Hex color for verse text content
+
 **Note**: Bible translation files are not included in this repository due to copyright restrictions. You can obtain them from [jadenzaleski/bible-translations](https://github.com/jadenzaleski/bible-translations) and place them in `~/.config/bible-go/translations/`.
 
 **Performance Note**: The app uses lazy loading - only the current translation is loaded at startup for fast startup times. Other translations are loaded on-demand when you switch to them.
