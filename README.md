@@ -15,7 +15,7 @@ The app automatically loads Bible translations from the `bible-data/` directory 
 
 **Performance Note**: The app uses lazy loading - only the current translation is loaded at startup for fast startup times. Other translations are loaded on-demand when you switch to them.
 
-Currently supported translations: AKJV, AMP, ASV, BRG, CSB, EHV, ESV, ESVUK, GNV, GW, ISV, JUB, KJ21, KJV, LEB, MEV, NASB, NASB1995, NET, NIV, NIVUK, NKJV, NLT, NLV, NOG, NRSV, NRSVUE, WEB, YLT.
+Supported translations are dynamically loaded from the available JSON files in `bible-data/`.
 
 The JSON structure should be:
 ```json
@@ -43,5 +43,15 @@ The JSON structure should be:
 ## Building
 
 ```bash
-go build
+go build -ldflags="-s -w"
 ```
+
+The `-ldflags="-s -w"` flags strip debug symbols for a smaller binary size.
+
+## Running
+
+```bash
+./bible-go
+```
+
+Ensure the `bible-data/` directory exists in the project root with Bible translation JSON files.
