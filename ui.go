@@ -32,6 +32,10 @@ type model struct {
 	zenMode            bool
 }
 
+func (m *model) getBibleData() *BibleData {
+	return m.multiBibleData.GetCurrentBibleData(m.currentTranslation)
+}
+
 type mode int
 
 const (
@@ -55,64 +59,70 @@ type Config struct {
 }
 
 const (
-	configDir  = "bible-go"
 	stateFile  = "state.json"
 	configFile = "config.json"
 )
 
-func getConfigPath() (string, error) {
-	configDir, err := getConfigDir()
+func getFilePath(filename string) (string, error) {
+	dir, err := ensureConfigDir()
 	if err != nil {
 		return "", err
 	}
-	err = os.MkdirAll(configDir, 0o755)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(configDir, stateFile), nil
+	return filepath.Join(dir, filename), nil
 }
 
-func getConfigFilePath() (string, error) {
-	configDir, err := getConfigDir()
+func saveJSON(filename string, data interface{}) error {
+	path, err := getFilePath(filename)
 	if err != nil {
-		return "", err
+		return err
 	}
-	err = os.MkdirAll(configDir, 0o755)
+
+	jsonData, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
-		return "", err
+		return err
 	}
-	return filepath.Join(configDir, configFile), nil
+
+	return os.WriteFile(path, jsonData, 0o644)
+}
+
+func loadJSON(filename string, target interface{}) error {
+	path, err := getFilePath(filename)
+	if err != nil {
+		return err
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(data, target)
 }
 
 func saveState(state AppState) error {
-	configPath, err := getConfigPath()
-	if err != nil {
-		return err
-	}
-
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(configPath, data, 0o644)
+	return saveJSON(stateFile, state)
 }
 
 func loadState() (AppState, error) {
 	var state AppState
-
-	configPath, err := getConfigPath()
-	if err != nil {
+	err := loadJSON(stateFile, &state)
+	if err != nil || state.CurrentTranslation == "" {
 		return getDefaultAppState(), nil
 	}
+	return state, nil
+}
 
-	data, err := os.ReadFile(configPath)
+func saveConfig(config Config) error {
+	return saveJSON(configFile, config)
+}
+
+func loadConfig() (Config, error) {
+	config := getDefaultConfig()
+	err := loadJSON(configFile, &config)
 	if err != nil {
-		return getDefaultAppState(), nil
+		saveConfig(config)
 	}
-
-	err = json.Unmarshal(data, &state)
-	return state, err
+	return config, nil
 }
 
 func getDefaultAppState() AppState {
@@ -125,45 +135,12 @@ func getDefaultAppState() AppState {
 	}
 }
 
-func saveConfig(config Config) error {
-	configPath, err := getConfigFilePath()
-	if err != nil {
-		return err
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(configPath, data, 0o644)
-}
-
-func loadConfig() (Config, error) {
-	config := getDefaultConfig()
-
-	configPath, err := getConfigFilePath()
-	if err != nil {
-		return config, nil
-	}
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		// File doesn't exist, create it with default config
-		saveConfig(config)
-		return config, nil
-	}
-
-	err = json.Unmarshal(data, &config)
-	return config, err
-}
-
 func getDefaultConfig() Config {
 	return Config{
-		HighlightColor: "#cba6f7", // Mauve
-		VerseNumColor:  "#89b4fa", // Blue
-		TextColor:      "#cdd6f4", // Text
-		DimColor:       "#313244", // Surface0 - darker for less distraction
+		HighlightColor: "#cba6f7",
+		VerseNumColor:  "#89b4fa",
+		TextColor:      "#cdd6f4",
+		DimColor:       "#313244",
 	}
 }
 
@@ -180,7 +157,9 @@ var (
 func initialModel() tea.Model {
 	multiBibleData, err := NewMultiBibleData()
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "Error loading Bible data: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Please ensure translation files exist in ~/.config/bible-go/translations/\n")
+		os.Exit(1)
 	}
 
 	savedState, err := loadState()
@@ -199,9 +178,15 @@ func initialModel() tea.Model {
 	}
 
 	bibleData := multiBibleData.GetCurrentBibleData(savedState.CurrentTranslation)
+	if bibleData == nil {
+		fmt.Fprintf(os.Stderr, "Error: Could not load translation '%s'\n", savedState.CurrentTranslation)
+		os.Exit(1)
+	}
+
 	books := bibleData.GetBooks()
 	if len(books) == 0 {
-		panic("no books found in bible data")
+		fmt.Fprintf(os.Stderr, "Error: No books found in Bible data\n")
+		os.Exit(1)
 	}
 
 	if savedState.CurrentBook == "" || !contains(books, savedState.CurrentBook) {
@@ -271,7 +256,7 @@ func (m *model) goToNextBook() {
 }
 
 func (m *model) navigateToBook(direction int) {
-	bibleData := m.multiBibleData.GetCurrentBibleData(m.currentTranslation)
+	bibleData := m.getBibleData()
 	books := bibleData.GetBooks()
 	for i, book := range books {
 		if book == m.currentBook {
@@ -279,21 +264,27 @@ func (m *model) navigateToBook(direction int) {
 			if newIndex >= 0 && newIndex < len(books) {
 				m.currentBook = books[newIndex]
 				m.currentChapter = 1
-				m.updateVersesAndReset(bibleData)
+				m.resetVerseView(bibleData)
 			}
 			break
 		}
 	}
 }
 
+func (m *model) resetVerseView(bibleData *BibleData) {
+	m.verses = bibleData.GetVerses(m.currentBook, m.currentChapter)
+	m.selected = 0
+	m.scrollOffset = 0
+}
+
 func (m *model) goToPreviousChapter() {
 	if m.mode != navigationMode {
 		return
 	}
-	bibleData := m.multiBibleData.GetCurrentBibleData(m.currentTranslation)
+	bibleData := m.getBibleData()
 	if m.currentChapter > 1 {
 		m.currentChapter--
-		m.updateVersesAndReset(bibleData)
+		m.resetVerseView(bibleData)
 	} else {
 		m.goToPreviousBookLastChapter(bibleData)
 	}
@@ -303,30 +294,24 @@ func (m *model) goToNextChapter() {
 	if m.mode != navigationMode {
 		return
 	}
-	bibleData := m.multiBibleData.GetCurrentBibleData(m.currentTranslation)
+	bibleData := m.getBibleData()
 	m.currentChapter++
 	m.verses = bibleData.GetVerses(m.currentBook, m.currentChapter)
 	if len(m.verses) == 0 {
 		m.goToNextBookFirstChapter(bibleData)
 	} else {
-		m.updateVersesAndReset(bibleData)
+		m.selected = 0
+		m.scrollOffset = 0
 	}
-}
-
-func (m *model) updateVersesAndReset(bibleData *BibleData) {
-	m.verses = bibleData.GetVerses(m.currentBook, m.currentChapter)
-	m.selected = 0
-	m.scrollOffset = 0
 }
 
 func (m *model) goToPreviousBookLastChapter(bibleData *BibleData) {
 	books := bibleData.GetBooks()
 	for i, book := range books {
 		if book == m.currentBook && i > 0 {
-			prevBook := books[i-1]
-			m.currentBook = prevBook
-			m.currentChapter = m.findLastChapter(bibleData, prevBook)
-			m.updateVersesAndReset(bibleData)
+			m.currentBook = books[i-1]
+			m.currentChapter = m.findLastChapter(bibleData, m.currentBook)
+			m.resetVerseView(bibleData)
 			break
 		}
 	}
@@ -336,15 +321,14 @@ func (m *model) goToNextBookFirstChapter(bibleData *BibleData) {
 	books := bibleData.GetBooks()
 	for i, book := range books {
 		if book == m.currentBook && i < len(books)-1 {
-			nextBook := books[i+1]
-			m.currentBook = nextBook
+			m.currentBook = books[i+1]
 			m.currentChapter = 1
-			m.updateVersesAndReset(bibleData)
+			m.resetVerseView(bibleData)
 			return
 		}
 	}
 	m.currentChapter--
-	m.updateVersesAndReset(bibleData)
+	m.resetVerseView(bibleData)
 }
 
 func (m *model) findLastChapter(bibleData *BibleData, book string) int {
@@ -371,6 +355,34 @@ func (m *model) moveDown(listLen int) {
 		if !m.zenMode {
 			m.adjustScrollOffset(listLen, m.getVisibleVerses())
 		}
+	}
+}
+
+func (m *model) getActiveList() (int, bool) {
+	if m.mode == searchMode && len(m.searchResults) > 0 {
+		return len(m.searchResults), true
+	}
+	if m.mode == navigationMode {
+		return len(m.verses), true
+	}
+	return 0, false
+}
+
+func (m *model) handleMovement(direction string) {
+	listLen, ok := m.getActiveList()
+	if !ok {
+		return
+	}
+
+	switch direction {
+	case "up":
+		m.moveUp(listLen)
+	case "down":
+		m.moveDown(listLen)
+	case "pageUp":
+		m.pageUp(listLen)
+	case "pageDown":
+		m.pageDown(listLen)
 	}
 }
 
@@ -416,7 +428,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyEnter:
 			if m.mode == searchMode {
 				if len(m.searchResults) == 0 && m.searchQuery != "" {
-					bibleData := m.multiBibleData.GetCurrentBibleData(m.currentTranslation)
+					bibleData := m.getBibleData()
 					m.searchResults = bibleData.Search(m.searchQuery)
 					m.selected = 0
 					m.scrollOffset = 0
@@ -424,7 +436,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					result := m.searchResults[m.selected]
 					m.currentBook = result.Book
 					m.currentChapter = result.Chapter
-					bibleData := m.multiBibleData.GetCurrentBibleData(m.currentTranslation)
+					bibleData := m.getBibleData()
 					m.verses = bibleData.GetVerses(result.Book, result.Chapter)
 					m.mode = navigationMode
 					m.selected = 0
@@ -487,14 +499,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 				case 'G':
-					if m.mode == navigationMode {
-						m.selected = len(m.verses) - 1
-						visibleVerses := m.getVisibleVerses()
-						if m.selected >= visibleVerses {
-							m.scrollOffset = m.selected - visibleVerses + 1
-						}
-					} else if m.mode == searchMode && len(m.searchResults) > 0 {
-						m.selected = len(m.searchResults) - 1
+					listLen, ok := m.getActiveList()
+					if ok {
+						m.selected = listLen - 1
 						visibleVerses := m.getVisibleVerses()
 						if m.selected >= visibleVerses {
 							m.scrollOffset = m.selected - visibleVerses + 1
@@ -509,17 +516,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.goToNextBook()
 					}
 				case 'k':
-					if m.mode == navigationMode {
-						m.moveUp(len(m.verses))
-					} else if m.mode == searchMode && len(m.searchResults) > 0 {
-						m.moveUp(len(m.searchResults))
-					}
+					m.handleMovement("up")
 				case 'j':
-					if m.mode == navigationMode {
-						m.moveDown(len(m.verses))
-					} else if m.mode == searchMode && len(m.searchResults) > 0 {
-						m.moveDown(len(m.searchResults))
-					}
+					m.handleMovement("down")
 				case 'h':
 					if m.mode == navigationMode {
 						m.goToPreviousChapter()
@@ -549,13 +548,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 
 						m.currentTranslation = m.multiBibleData.translationNames[nextIndex]
-						bibleData := m.multiBibleData.GetCurrentBibleData(m.currentTranslation)
+						bibleData := m.getBibleData()
 						books := bibleData.GetBooks()
 						if !contains(books, m.currentBook) {
 							m.currentBook = books[0]
 							m.currentChapter = 1
 						}
-						m.updateVersesAndReset(bibleData)
+						m.resetVerseView(bibleData)
 					}
 				case 'z':
 					if m.mode == navigationMode {
@@ -568,18 +567,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case tea.KeyUp:
-			if m.mode == navigationMode {
-				m.moveUp(len(m.verses))
-			} else if m.mode == searchMode && len(m.searchResults) > 0 {
-				m.moveUp(len(m.searchResults))
-			}
+			m.handleMovement("up")
 
 		case tea.KeyDown:
-			if m.mode == navigationMode {
-				m.moveDown(len(m.verses))
-			} else if m.mode == searchMode && len(m.searchResults) > 0 {
-				m.moveDown(len(m.searchResults))
-			}
+			m.handleMovement("down")
 
 		case tea.KeyLeft:
 			m.goToPreviousChapter()
@@ -588,24 +579,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.goToNextChapter()
 
 		case tea.KeyPgUp:
-			m.goToPreviousBook()
+			if m.mode == navigationMode {
+				m.goToPreviousBook()
+			}
 
 		case tea.KeyPgDown:
-			m.goToNextBook()
+			if m.mode == navigationMode {
+				m.goToNextBook()
+			}
 
 		case tea.KeyCtrlD:
-			if m.mode == navigationMode {
-				m.pageDown(len(m.verses))
-			} else if m.mode == searchMode && len(m.searchResults) > 0 {
-				m.pageDown(len(m.searchResults))
-			}
+			m.handleMovement("pageDown")
 
 		case tea.KeyCtrlU:
-			if m.mode == navigationMode {
-				m.pageUp(len(m.verses))
-			} else if m.mode == searchMode && len(m.searchResults) > 0 {
-				m.pageUp(len(m.searchResults))
-			}
+			m.handleMovement("pageUp")
 		}
 	}
 
@@ -626,46 +613,35 @@ func (m model) View() string {
 
 	if m.mode == navigationMode {
 		if m.zenMode {
-			// Header at top - always fixed (1 line)
 			header := m.bookStyle.Render(fmt.Sprintf("%s %s %d", m.currentTranslation, m.currentBook, m.currentChapter))
 			content.WriteString(m.centerText(header))
 			content.WriteString("\n\n")
 
-			// In zen mode, show only a few verses around the selected one
 			versesAbove := 2
 			versesBelow := 2
 
-			// Calculate lines - be precise about what we're rendering
-			// Header = 1 line, blank after header = 1 line, Help = 1 line
-			// Each verse = 1 line, spacing between verses = 1 line each
 			headerLines := 1
 			headerSpacing := 1
 			helpLines := 1
-			verseCount := versesAbove + 1 + versesBelow      // 5 verses
-			verseLinesTotal := verseCount + (verseCount - 1) // 5 verses + 4 spacing lines = 9 lines
+			verseCount := versesAbove + 1 + versesBelow
+			verseLinesTotal := verseCount + (verseCount - 1)
 
-			// Available height for all content (verses + padding)
 			availableHeight := m.height - headerLines - headerSpacing - helpLines
 
-			// Calculate padding to center the verse group
 			topPadding := max(0, (availableHeight-verseLinesTotal)/2)
 
-			// Add top padding to vertically center the verse group
 			for i := 0; i < topPadding; i++ {
 				content.WriteString("\n")
 			}
 
-			// Calculate which verses to render
 			startIdx := m.selected - versesAbove
 			endIdx := m.selected + versesBelow + 1
 
-			// Render verses with spacing
 			for i := startIdx; i < endIdx; i++ {
 				if i < 0 || i >= len(m.verses) {
-					// Empty line for padding when out of bounds
 					content.WriteString("\n")
 					if i < endIdx-1 {
-						content.WriteString("\n") // spacing
+						content.WriteString("\n")
 					}
 				} else {
 					verse := m.verses[i]
@@ -674,21 +650,18 @@ func (m model) View() string {
 
 					m.renderVerseZen(&content, verse, i == m.selected, verseNumStr, paddingWidth)
 
-					// Add extra spacing between verses for breathing room
 					if i < endIdx-1 {
 						content.WriteString("\n")
 					}
 				}
 			}
 
-			// Fill remaining space to push help text to bottom
 			linesUsed := headerLines + headerSpacing + topPadding + verseLinesTotal
 			bottomPadding := max(0, m.height-linesUsed-helpLines)
 			for i := 0; i < bottomPadding; i++ {
 				content.WriteString("\n")
 			}
 
-			// Help at bottom - always fixed and centered
 			helpStyled := lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.VerseNumColor)).Render(helpText)
 			content.WriteString(m.centerText(helpStyled))
 		} else {
@@ -700,21 +673,16 @@ func (m model) View() string {
 			m.adjustScrollOffset(len(m.verses), visibleVerses)
 			end := min(len(m.verses), m.scrollOffset+visibleVerses)
 
-			linesUsed := 0
-			linesUsed += 3
-
+			linesUsed := 3
 			for i := m.scrollOffset; i < end; i++ {
 				verse := m.verses[i]
 				verseNumStr := m.verseNumStyle.Render(fmt.Sprintf("%3d", verse.Verse))
-				paddingWidth := 6
-
-				lineCount := m.renderVerse(&content, verse, i == m.selected, verseNumStr, paddingWidth)
-				linesUsed += lineCount
+				linesUsed += m.renderVerse(&content, verse, i == m.selected, verseNumStr, verseTextPadding)
 			}
 
-			remainingLines := m.height - linesUsed - 1
+			remainingLines := m.height - linesUsed
 			if remainingLines > 0 {
-				content.WriteString(strings.Repeat("\n", remainingLines+1))
+				content.WriteString(strings.Repeat("\n", remainingLines))
 			}
 
 			helpStyled := lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.VerseNumColor)).Render(helpText)
@@ -760,20 +728,17 @@ func (m model) View() string {
 
 			end := min(len(m.searchResults), m.scrollOffset+visibleCount)
 
-			actualLinesUsed := 0
+			linesUsed := 3
 			for i := m.scrollOffset; i < end; i++ {
 				result := m.searchResults[i]
 				reference := truncateText(fmt.Sprintf("%s %d:%d", result.Book, result.Chapter, result.Verse), 20)
 				verseNumStr := m.verseNumStyle.Render(fmt.Sprintf("%-20s", reference))
-				paddingWidth := 23
-
-				lineCount := m.renderVerse(&content, result, i == m.selected, verseNumStr, paddingWidth)
-				actualLinesUsed += lineCount
+				linesUsed += m.renderVerse(&content, result, i == m.selected, verseNumStr, searchTextPadding)
 			}
 
-			remainingLines := m.height - 4 - actualLinesUsed
+			remainingLines := m.height - linesUsed
 			if remainingLines > 0 {
-				content.WriteString(strings.Repeat("\n", remainingLines+1))
+				content.WriteString(strings.Repeat("\n", remainingLines))
 			}
 
 			helpStyled := lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.VerseNumColor)).Render(helpText)
@@ -783,16 +748,17 @@ func (m model) View() string {
 			content.WriteString(m.centerText(header))
 			content.WriteString("\n\n")
 
+			var promptText string
 			if m.searchQuery != "" {
-				content.WriteString("Press Enter to search")
+				promptText = "Press Enter to search"
 			} else {
-				content.WriteString("Type to search...")
+				promptText = "Type to search..."
 			}
-			content.WriteString("\n")
+			content.WriteString(m.centerText(promptText))
 
-			remainingLines := m.height - 5
+			remainingLines := m.height - 3
 			if remainingLines > 0 {
-				content.WriteString(strings.Repeat("\n", remainingLines+1))
+				content.WriteString(strings.Repeat("\n", remainingLines))
 			}
 
 			helpStyled := lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.VerseNumColor)).Render(helpText)
@@ -849,12 +815,17 @@ func (m model) calculateTextHeight(text string, paddingWidth int) int {
 	return max(2, len(wrapVerseText(text, textWidth))+1)
 }
 
+const (
+	verseTextPadding  = 6
+	searchTextPadding = 23
+)
+
 func (m model) calculateVerseHeight(verse Verse) int {
-	return m.calculateTextHeight(verse.Text, 2+3+1)
+	return m.calculateTextHeight(verse.Text, verseTextPadding)
 }
 
 func (m model) calculateSearchResultHeight(result Verse) int {
-	return m.calculateTextHeight(result.Text, 2+20+1)
+	return m.calculateTextHeight(result.Text, searchTextPadding)
 }
 
 func wrapVerseText(text string, maxWidth int) []string {
@@ -867,14 +838,16 @@ func wrapVerseText(text string, maxWidth int) []string {
 		return []string{text}
 	}
 
-	lines := make([]string, 0, len(words)/4)
+	lines := make([]string, 0, (len(words)+3)/4)
 	var currentLine strings.Builder
+	currentLine.Grow(maxWidth)
 
 	for i, word := range words {
 		if currentLine.Len() > 0 {
 			if currentLine.Len()+1+len(word) > maxWidth {
 				lines = append(lines, currentLine.String())
 				currentLine.Reset()
+				currentLine.Grow(maxWidth)
 				currentLine.WriteString(word)
 			} else {
 				currentLine.WriteByte(' ')
@@ -914,12 +887,14 @@ func (m model) renderVerse(content *strings.Builder, verse Verse, isSelected boo
 	content.WriteByte('\n')
 	linesUsed := 1
 
-	padding := strings.Repeat(" ", paddingWidth)
-	for _, line := range verseLines[1:] {
-		content.WriteString(padding)
-		content.WriteString(m.textStyle.Render(line))
-		content.WriteByte('\n')
-		linesUsed++
+	if len(verseLines) > 1 {
+		padding := strings.Repeat(" ", paddingWidth)
+		for _, line := range verseLines[1:] {
+			content.WriteString(padding)
+			content.WriteString(m.textStyle.Render(line))
+			content.WriteByte('\n')
+			linesUsed++
+		}
 	}
 
 	content.WriteByte('\n')
@@ -958,29 +933,24 @@ func (m model) centerText(text string) string {
 	return strings.Repeat(" ", leftPadding) + text
 }
 
-func (m model) renderVerseZen(content *strings.Builder, verse Verse, isSelected bool, verseNumStr string, paddingWidth int) int {
-	// Build the verse line
-	var lineContent strings.Builder
-
-	// In zen mode, no cursor or verse number for any verse - pure text only
-	textWidth := 10000 // Single line
+func (m model) renderVerseZen(content *strings.Builder, verse Verse, isSelected bool, verseNumStr string, paddingWidth int) {
+	textWidth := 10000
 	verseLines := wrapVerseText(verse.Text, textWidth)
 
-	if len(verseLines) > 0 {
-		if !isSelected {
-			lineContent.WriteString(m.dimStyle.Render(verseLines[0]))
-		} else {
-			lineContent.WriteString(m.textStyle.Render(verseLines[0]))
-		}
+	if len(verseLines) == 0 {
+		return
 	}
 
-	// Get the line content
-	line := lineContent.String()
+	var style lipgloss.Style
+	if isSelected {
+		style = m.textStyle
+	} else {
+		style = m.dimStyle
+	}
 
-	// Calculate visual width (accounting for ANSI codes)
+	line := style.Render(verseLines[0])
 	visualWidth := lipgloss.Width(line)
 
-	// Center the line manually
 	if visualWidth < m.width {
 		leftPadding := (m.width - visualWidth) / 2
 		content.WriteString(strings.Repeat(" ", leftPadding))
@@ -988,6 +958,4 @@ func (m model) renderVerseZen(content *strings.Builder, verse Verse, isSelected 
 
 	content.WriteString(line)
 	content.WriteString("\n")
-
-	return 1
 }

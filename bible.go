@@ -39,19 +39,6 @@ func NewBibleData(jsonData []byte) (*BibleData, error) {
 		return nil, fmt.Errorf("failed to parse bible JSON: %w", err)
 	}
 
-	biblicalOrder := []string{
-		"Genesis", "Exodus", "Leviticus", "Numbers", "Deuteronomy",
-		"Joshua", "Judges", "Ruth", "1 Samuel", "2 Samuel", "1 Kings", "2 Kings",
-		"1 Chronicles", "2 Chronicles", "Ezra", "Nehemiah", "Esther", "Job", "Psalm",
-		"Proverbs", "Ecclesiastes", "Song Of Solomon", "Isaiah", "Jeremiah",
-		"Lamentations", "Ezekiel", "Daniel", "Hosea", "Joel", "Amos", "Obadiah",
-		"Jonah", "Micah", "Nahum", "Habakkuk", "Zephaniah", "Haggai", "Zechariah", "Malachi",
-		"Matthew", "Mark", "Luke", "John", "Acts", "Romans", "1 Corinthians", "2 Corinthians",
-		"Galatians", "Ephesians", "Philippians", "Colossians", "1 Thessalonians", "2 Thessalonians",
-		"1 Timothy", "2 Timothy", "Titus", "Philemon", "Hebrews", "James", "1 Peter", "2 Peter",
-		"1 John", "2 John", "3 John", "Jude", "Revelation",
-	}
-
 	bd := &BibleData{
 		verses:       make([]Verse, 0),
 		bookList:     make([]string, 0, len(bible)),
@@ -59,21 +46,16 @@ func NewBibleData(jsonData []byte) (*BibleData, error) {
 		chapterIndex: make(map[string]map[int][]Verse),
 	}
 
+	bookSet := make(map[string]bool, len(bible))
 	for _, bookName := range biblicalOrder {
 		if _, exists := bible[bookName]; exists {
 			bd.bookList = append(bd.bookList, bookName)
+			bookSet[bookName] = true
 		}
 	}
 
 	for bookName := range bible {
-		found := false
-		for _, orderedBook := range bd.bookList {
-			if bookName == orderedBook {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !bookSet[bookName] {
 			bd.bookList = append(bd.bookList, bookName)
 		}
 	}
@@ -101,10 +83,8 @@ func NewBibleData(jsonData []byte) (*BibleData, error) {
 				}
 				bd.chapterIndex[bookName][chapterNum] = append(bd.chapterIndex[bookName][chapterNum], verseObj)
 
-				words := strings.Fields(strings.ToLower(text))
-				for _, word := range words {
-					cleanWord := strings.Trim(word, ".,;:!?\"'()[]")
-					if len(cleanWord) > 2 {
+				for _, word := range strings.Fields(strings.ToLower(text)) {
+					if cleanWord := cleanWord(word); len(cleanWord) > minWordLength {
 						bd.index[cleanWord] = append(bd.index[cleanWord], len(bd.verses)-1)
 					}
 				}
@@ -113,6 +93,19 @@ func NewBibleData(jsonData []byte) (*BibleData, error) {
 	}
 
 	return bd, nil
+}
+
+var biblicalOrder = []string{
+	"Genesis", "Exodus", "Leviticus", "Numbers", "Deuteronomy",
+	"Joshua", "Judges", "Ruth", "1 Samuel", "2 Samuel", "1 Kings", "2 Kings",
+	"1 Chronicles", "2 Chronicles", "Ezra", "Nehemiah", "Esther", "Job", "Psalm",
+	"Proverbs", "Ecclesiastes", "Song Of Solomon", "Isaiah", "Jeremiah",
+	"Lamentations", "Ezekiel", "Daniel", "Hosea", "Joel", "Amos", "Obadiah",
+	"Jonah", "Micah", "Nahum", "Habakkuk", "Zephaniah", "Haggai", "Zechariah", "Malachi",
+	"Matthew", "Mark", "Luke", "John", "Acts", "Romans", "1 Corinthians", "2 Corinthians",
+	"Galatians", "Ephesians", "Philippians", "Colossians", "1 Thessalonians", "2 Thessalonians",
+	"1 Timothy", "2 Timothy", "Titus", "Philemon", "Hebrews", "James", "1 Peter", "2 Peter",
+	"1 John", "2 John", "3 John", "Jude", "Revelation",
 }
 
 func sortMapKeysAsInts[T any](m map[string]T) []int {
@@ -126,6 +119,10 @@ func sortMapKeysAsInts[T any](m map[string]T) []int {
 	return numbers
 }
 
+func cleanWord(word string) string {
+	return strings.Trim(word, ".,;:!?\"'()[]")
+}
+
 func getConfigDir() (string, error) {
 	configDir := os.Getenv("XDG_CONFIG_HOME")
 	if configDir == "" {
@@ -136,6 +133,17 @@ func getConfigDir() (string, error) {
 		configDir = filepath.Join(homeDir, ".config")
 	}
 	return filepath.Join(configDir, "bible-go"), nil
+}
+
+func ensureConfigDir() (string, error) {
+	dir, err := getConfigDir()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 func NewMultiBibleData() (*MultiBibleData, error) {
@@ -182,24 +190,27 @@ func (mbd *MultiBibleData) GetCurrentBibleData(translation string) *BibleData {
 	}
 
 	if filePath, exists := mbd.filePaths[translation]; exists {
-		data, err := os.ReadFile(filePath)
-		if err != nil {
-			return mbd.getFallbackTranslation(translation)
+		if bd := mbd.loadTranslation(filePath); bd != nil {
+			mbd.translations[translation] = bd
+			return bd
 		}
-
-		bd, err := NewBibleData(data)
-		if err != nil {
-			return mbd.getFallbackTranslation(translation)
-		}
-
-		mbd.translations[translation] = bd
-		return bd
 	}
 
-	if len(mbd.translationNames) > 0 {
-		return mbd.GetCurrentBibleData(mbd.translationNames[0])
+	return mbd.getFallbackTranslation(translation)
+}
+
+func (mbd *MultiBibleData) loadTranslation(filePath string) *BibleData {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil
 	}
-	return nil
+
+	bd, err := NewBibleData(data)
+	if err != nil {
+		return nil
+	}
+
+	return bd
 }
 
 func (mbd *MultiBibleData) getFallbackTranslation(translation string) *BibleData {
@@ -244,17 +255,23 @@ func fuzzyMatchAndScore(text, pattern string) (matches bool, score int) {
 
 	words := strings.Fields(textLower)
 	for i, word := range words {
-		cleanWord := strings.Trim(word, ".,;:!?\"'()[]")
-		if strings.HasPrefix(cleanWord, patternLower) {
+		cleaned := cleanWord(word)
+		if strings.HasPrefix(cleaned, patternLower) {
 			return true, 100 + i
 		}
-		if strings.Contains(cleanWord, patternLower) {
+		if strings.Contains(cleaned, patternLower) {
 			return true, 500 + i
 		}
 	}
 
 	return false, 1000000
 }
+
+const (
+	noMatchScore    = 1000000
+	minWordLength   = 2
+	minSearchLength = 2
+)
 
 func intersect(a, b []int) []int {
 	var result []int
@@ -278,8 +295,8 @@ func sortAndExtractVerses(matches []scoredVerse) []Verse {
 		return matches[i].score < matches[j].score
 	})
 	verses := make([]Verse, len(matches))
-	for i, match := range matches {
-		verses[i] = match.verse
+	for i := range matches {
+		verses[i] = matches[i].verse
 	}
 	return verses
 }
@@ -310,26 +327,39 @@ func (bd *BibleData) Search(query string) []Verse {
 		searchTerm := parts[len(parts)-1]
 
 		if matchedBook := bd.findBook(bookName); matchedBook != "" {
-			var matches []scoredVerse
-			for _, verse := range bd.verses {
-				if verse.Book == matchedBook {
-					if match, score := fuzzyMatchAndScore(verse.Text, searchTerm); match {
-						matches = append(matches, scoredVerse{verse: verse, score: score})
-					}
-				}
-			}
-			if len(matches) > 0 {
-				return sortAndExtractVerses(matches)
+			results := bd.searchInBook(matchedBook, searchTerm)
+			if len(results) > 0 {
+				return results
 			}
 		}
 	}
 
-	// Optimize search using word index
 	words := strings.Fields(strings.ToLower(query))
+	candidates := bd.getCandidateIndices(words)
+
+	if candidates != nil {
+		return bd.scoreAndSortCandidates(candidates, query)
+	}
+
+	return bd.fullTextSearch(query)
+}
+
+func (bd *BibleData) searchInBook(bookName, searchTerm string) []Verse {
+	var matches []scoredVerse
+	for _, verse := range bd.verses {
+		if verse.Book == bookName {
+			if match, score := fuzzyMatchAndScore(verse.Text, searchTerm); match {
+				matches = append(matches, scoredVerse{verse: verse, score: score})
+			}
+		}
+	}
+	return sortAndExtractVerses(matches)
+}
+
+func (bd *BibleData) getCandidateIndices(words []string) []int {
 	var candidates []int
 	for _, word := range words {
-		clean := strings.Trim(word, ".,;:!?\"'()[]")
-		if len(clean) > 2 {
+		if clean := cleanWord(word); len(clean) > minSearchLength {
 			if indices, ok := bd.index[clean]; ok {
 				if candidates == nil {
 					candidates = make([]int, len(indices))
@@ -338,31 +368,31 @@ func (bd *BibleData) Search(query string) []Verse {
 					candidates = intersect(candidates, indices)
 				}
 			} else {
-				candidates = nil
-				break
+				return nil
 			}
 		}
 	}
+	return candidates
+}
 
-	if candidates != nil {
-		var matches []scoredVerse
-		for _, idx := range candidates {
-			verse := bd.verses[idx]
-			if match, score := fuzzyMatchAndScore(verse.Text, query); match {
-				matches = append(matches, scoredVerse{verse: verse, score: score})
-			}
+func (bd *BibleData) scoreAndSortCandidates(candidates []int, query string) []Verse {
+	matches := make([]scoredVerse, 0, len(candidates))
+	for _, idx := range candidates {
+		verse := bd.verses[idx]
+		if match, score := fuzzyMatchAndScore(verse.Text, query); match {
+			matches = append(matches, scoredVerse{verse: verse, score: score})
 		}
-		return sortAndExtractVerses(matches)
 	}
+	return sortAndExtractVerses(matches)
+}
 
-	// Fallback to full scan
+func (bd *BibleData) fullTextSearch(query string) []Verse {
 	var matches []scoredVerse
 	for _, verse := range bd.verses {
 		if match, score := fuzzyMatchAndScore(verse.Text, query); match {
 			matches = append(matches, scoredVerse{verse: verse, score: score})
 		}
 	}
-
 	return sortAndExtractVerses(matches)
 }
 
