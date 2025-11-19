@@ -626,12 +626,9 @@ func (m model) View() string {
 
 	if m.mode == navigationMode {
 		if m.zenMode {
-			// Add buffer at top to ensure header is visible
-			content.WriteString("\n")
-
 			// Header at top - always fixed (1 line)
 			header := m.bookStyle.Render(fmt.Sprintf("%s %s %d", m.currentTranslation, m.currentBook, m.currentChapter))
-			content.WriteString(header)
+			content.WriteString(m.centerText(header))
 			content.WriteString("\n\n")
 
 			// In zen mode, show only a few verses around the selected one
@@ -639,9 +636,8 @@ func (m model) View() string {
 			versesBelow := 2
 
 			// Calculate lines - be precise about what we're rendering
-			// Top buffer = 1 line, Header = 1 line, blank after header = 1 line, Help = 1 line
+			// Header = 1 line, blank after header = 1 line, Help = 1 line
 			// Each verse = 1 line, spacing between verses = 1 line each
-			topBufferLines := 1
 			headerLines := 1
 			headerSpacing := 1
 			helpLines := 1
@@ -649,7 +645,7 @@ func (m model) View() string {
 			verseLinesTotal := verseCount + (verseCount - 1) // 5 verses + 4 spacing lines = 9 lines
 
 			// Available height for all content (verses + padding)
-			availableHeight := m.height - topBufferLines - headerLines - headerSpacing - helpLines
+			availableHeight := m.height - headerLines - headerSpacing - helpLines
 
 			// Calculate padding to center the verse group
 			topPadding := max(0, (availableHeight-verseLinesTotal)/2)
@@ -686,16 +682,18 @@ func (m model) View() string {
 			}
 
 			// Fill remaining space to push help text to bottom
-			linesUsed := topBufferLines + headerLines + headerSpacing + topPadding + verseLinesTotal
+			linesUsed := headerLines + headerSpacing + topPadding + verseLinesTotal
 			bottomPadding := max(0, m.height-linesUsed-helpLines)
 			for i := 0; i < bottomPadding; i++ {
 				content.WriteString("\n")
 			}
 
-			// Help at bottom - always fixed
-			content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.VerseNumColor)).MarginTop(1).PaddingLeft(1).Render(helpText))
+			// Help at bottom - always fixed and centered
+			helpStyled := lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.VerseNumColor)).Render(helpText)
+			content.WriteString(m.centerText(helpStyled))
 		} else {
-			content.WriteString(m.bookStyle.Render(fmt.Sprintf("%s %s %d", m.currentTranslation, m.currentBook, m.currentChapter)))
+			header := m.bookStyle.Render(fmt.Sprintf("%s %s %d", m.currentTranslation, m.currentBook, m.currentChapter))
+			content.WriteString(m.centerText(header))
 			content.WriteString("\n\n")
 
 			visibleVerses := m.getVisibleVerses()
@@ -716,14 +714,16 @@ func (m model) View() string {
 
 			remainingLines := m.height - linesUsed - 1
 			if remainingLines > 0 {
-				content.WriteString(strings.Repeat("\n", remainingLines))
+				content.WriteString(strings.Repeat("\n", remainingLines+1))
 			}
 
-			content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.VerseNumColor)).MarginTop(1).PaddingLeft(1).Render(helpText))
+			helpStyled := lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.VerseNumColor)).Render(helpText)
+			content.WriteString(m.centerText(helpStyled))
 		}
 	} else {
 		if len(m.searchResults) > 0 {
-			content.WriteString(m.bookStyle.Render(fmt.Sprintf("Search: %s (%d results)", m.searchQuery, len(m.searchResults))))
+			header := m.bookStyle.Render(fmt.Sprintf("Search: %s (%d results)", m.searchQuery, len(m.searchResults)))
+			content.WriteString(m.centerText(header))
 			content.WriteString("\n\n")
 
 			availableHeight := m.height - 6
@@ -773,12 +773,14 @@ func (m model) View() string {
 
 			remainingLines := m.height - 4 - actualLinesUsed
 			if remainingLines > 0 {
-				content.WriteString(strings.Repeat("\n", remainingLines))
+				content.WriteString(strings.Repeat("\n", remainingLines+1))
 			}
 
-			content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.VerseNumColor)).MarginTop(1).PaddingLeft(1).Render(helpText))
+			helpStyled := lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.VerseNumColor)).Render(helpText)
+			content.WriteString(m.centerText(helpStyled))
 		} else {
-			content.WriteString(m.bookStyle.Render(fmt.Sprintf("Search: %s", m.searchQuery)))
+			header := m.bookStyle.Render(fmt.Sprintf("Search: %s", m.searchQuery))
+			content.WriteString(m.centerText(header))
 			content.WriteString("\n\n")
 
 			if m.searchQuery != "" {
@@ -790,10 +792,11 @@ func (m model) View() string {
 
 			remainingLines := m.height - 5
 			if remainingLines > 0 {
-				content.WriteString(strings.Repeat("\n", remainingLines))
+				content.WriteString(strings.Repeat("\n", remainingLines+1))
 			}
 
-			content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.VerseNumColor)).MarginTop(1).PaddingLeft(1).Render(helpText))
+			helpStyled := lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.VerseNumColor)).Render(helpText)
+			content.WriteString(m.centerText(helpStyled))
 		}
 	}
 
@@ -944,6 +947,15 @@ func truncateText(text string, maxLen int) string {
 		return text[:maxLen]
 	}
 	return text[:maxLen-3] + "..."
+}
+
+func (m model) centerText(text string) string {
+	visualWidth := lipgloss.Width(text)
+	if visualWidth >= m.width {
+		return text
+	}
+	leftPadding := (m.width - visualWidth) / 2
+	return strings.Repeat(" ", leftPadding) + text
 }
 
 func (m model) renderVerseZen(content *strings.Builder, verse Verse, isSelected bool, verseNumStr string, paddingWidth int) int {
