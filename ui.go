@@ -623,8 +623,28 @@ func (m model) View() string {
 			headerLines := 1
 			headerSpacing := 1
 			helpLines := 1
-			verseCount := versesAbove + 1 + versesBelow
-			verseLinesTotal := verseCount + (verseCount - 1)
+
+			// Keep the vertical centering accurate even when a verse wraps.
+			const (
+				zenSideMargin   = 6
+				zenMaxTextWidth = 80
+			)
+			zenTextWidth := max(20, m.width-(zenSideMargin*2))
+			zenTextWidth = min(zenTextWidth, zenMaxTextWidth)
+
+			startIdx := m.selected - versesAbove
+			endIdx := m.selected + versesBelow + 1
+			verseLinesTotal := 0
+			for i := startIdx; i < endIdx; i++ {
+				if i < 0 || i >= len(m.verses) {
+					verseLinesTotal += 1
+				} else {
+					verseLinesTotal += max(1, len(wrapVerseText(m.verses[i].Text, zenTextWidth)))
+				}
+				if i < endIdx-1 {
+					verseLinesTotal += 1 // blank line between verses
+				}
+			}
 
 			availableHeight := m.height - headerLines - headerSpacing - helpLines
 
@@ -633,9 +653,6 @@ func (m model) View() string {
 			for i := 0; i < topPadding; i++ {
 				content.WriteString("\n")
 			}
-
-			startIdx := m.selected - versesAbove
-			endIdx := m.selected + versesBelow + 1
 
 			for i := startIdx; i < endIdx; i++ {
 				if i < 0 || i >= len(m.verses) {
@@ -934,7 +951,17 @@ func (m model) centerText(text string) string {
 }
 
 func (m model) renderVerseZen(content *strings.Builder, verse Verse, isSelected bool, verseNumStr string, paddingWidth int) {
-	textWidth := 10000
+	// In zen mode we constrain the reading column so long verses don't
+	// run off-screen. We still center the rendered line(s) within the
+	// full terminal width.
+	const (
+		zenSideMargin   = 6
+		zenMaxTextWidth = 80
+	)
+
+	textWidth := max(20, m.width-(zenSideMargin*2))
+	textWidth = min(textWidth, zenMaxTextWidth)
+
 	verseLines := wrapVerseText(verse.Text, textWidth)
 
 	if len(verseLines) == 0 {
@@ -948,14 +975,14 @@ func (m model) renderVerseZen(content *strings.Builder, verse Verse, isSelected 
 		style = m.dimStyle
 	}
 
-	line := style.Render(verseLines[0])
-	visualWidth := lipgloss.Width(line)
-
-	if visualWidth < m.width {
-		leftPadding := (m.width - visualWidth) / 2
-		content.WriteString(strings.Repeat(" ", leftPadding))
+	for _, rawLine := range verseLines {
+		line := style.Render(rawLine)
+		visualWidth := lipgloss.Width(line)
+		if visualWidth < m.width {
+			leftPadding := (m.width - visualWidth) / 2
+			content.WriteString(strings.Repeat(" ", leftPadding))
+		}
+		content.WriteString(line)
+		content.WriteString("\n")
 	}
-
-	content.WriteString(line)
-	content.WriteString("\n")
 }
