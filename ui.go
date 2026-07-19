@@ -829,7 +829,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	var content strings.Builder
 
-	helpText := "hjkl: Navigate • b/w: Book • t/T: Translation • /: Search • n/N: Matches • m: Mark • ': Bookmarks • y: Copy • z: Zen • q: Quit"
+	matchesHint := ""
+	if len(m.searchResults) > 0 {
+		matchesHint = "n/N: Matches • "
+	}
+	helpText := "hjkl: Navigate • b/w: Book • t/T: Translation • /: Search • " + matchesHint + "m: Mark • ': Bookmarks • y: Copy • z: Zen • q: Quit"
 	switch {
 	case m.mode == searchMode && len(m.searchResults) > 0:
 		helpText = "j/k: Navigate • Enter: Select • y: Copy • /: New search • Esc: Back"
