@@ -54,9 +54,9 @@ const (
 )
 
 type AppState struct {
-	CurrentTranslation string `json:"currentTranslation"`
-	CurrentBook        string `json:"currentBook"`
-	CurrentChapter     int    `json:"currentChapter"`
+	CurrentTranslation string     `json:"currentTranslation"`
+	CurrentBook        string     `json:"currentBook"`
+	CurrentChapter     int        `json:"currentChapter"`
 	Selected           int        `json:"selected"`
 	ScrollOffset       int        `json:"scrollOffset"`
 	ZenMode            bool       `json:"zenMode"`
@@ -820,8 +820,8 @@ func (m model) View() string {
 			content.WriteString(m.centerText(header))
 			content.WriteString("\n\n")
 
-			versesAbove := 4
-			versesBelow := 4
+			versesAbove := 2
+			versesBelow := 2
 
 			headerLines := 1
 			headerSpacing := 1
