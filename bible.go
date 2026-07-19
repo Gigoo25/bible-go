@@ -83,9 +83,13 @@ func NewBibleData(jsonData []byte) (*BibleData, error) {
 				}
 				bd.chapterIndex[bookName][chapterNum] = append(bd.chapterIndex[bookName][chapterNum], verseObj)
 
+				verseIdx := len(bd.verses) - 1
 				for _, word := range strings.Fields(strings.ToLower(text)) {
 					if cleanWord := cleanWord(word); len(cleanWord) > minWordLength {
-						bd.index[cleanWord] = append(bd.index[cleanWord], len(bd.verses)-1)
+						// Dedupe: a word repeated in a verse gets one posting.
+						if postings := bd.index[cleanWord]; len(postings) == 0 || postings[len(postings)-1] != verseIdx {
+							bd.index[cleanWord] = append(postings, verseIdx)
+						}
 					}
 				}
 			}
@@ -346,8 +350,8 @@ func (bd *BibleData) Search(query string) []Verse {
 
 func (bd *BibleData) searchInBook(bookName, searchTerm string) []Verse {
 	var matches []scoredVerse
-	for _, verse := range bd.verses {
-		if verse.Book == bookName {
+	for _, verses := range bd.chapterIndex[bookName] {
+		for _, verse := range verses {
 			if match, score := fuzzyMatchAndScore(verse.Text, searchTerm); match {
 				matches = append(matches, scoredVerse{verse: verse, score: score})
 			}
@@ -441,11 +445,18 @@ func (bd *BibleData) searchByReference(query string) []Verse {
 
 	var results []Verse
 
-	for _, verse := range bd.verses {
-		if verse.Book == matchedBook {
-			if chapterNum > 0 && verse.Chapter != chapterNum {
-				continue
-			}
+	chapters := bd.chapterIndex[matchedBook]
+	chapterNums := make([]int, 0, len(chapters))
+	for ch := range chapters {
+		if chapterNum > 0 && ch != chapterNum {
+			continue
+		}
+		chapterNums = append(chapterNums, ch)
+	}
+	sort.Ints(chapterNums)
+
+	for _, ch := range chapterNums {
+		for _, verse := range chapters[ch] {
 			if verseNum > 0 && verse.Verse != verseNum {
 				continue
 			}
