@@ -27,6 +27,7 @@ Configuration can be customized by editing `~/.config/bible-go/config.json`. The
 - `verseNumColor`: Hex color for verse numbers and search result references
 - `textColor`: Hex color for verse text content
 - `dimColor`: Hex color for dimmed verses in zen mode
+- `maxWidth`: Optional cap on the reading column width (defaults to the full pane width)
 
 Alternatively, set `"theme"` to a built-in palette: `catppuccin-mocha` (default), `catppuccin-latte`, `gruvbox`, `nord`, `dracula`, `everforest`, `tokyonight`. Any explicitly set color overrides the theme:
 ```json

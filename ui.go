@@ -328,14 +328,14 @@ func (m *model) resetVerseView(bibleData *BibleData) {
 	m.scrollOffset = 0
 }
 
-// readingWidth caps the wrapped text column so long lines stay readable
-// on wide terminals. Configurable via "maxWidth" (0 = default 80).
+// readingWidth is the wrapped text column. It fills the pane by default;
+// set "maxWidth" in config.json to cap it for a narrower reading column.
 func (m model) readingWidth(paddingWidth int) int {
-	cap := m.config.MaxWidth
-	if cap <= 0 {
-		cap = 80
+	full := max(20, m.width-paddingWidth)
+	if m.config.MaxWidth <= 0 {
+		return full
 	}
-	return min(max(20, m.width-paddingWidth), cap)
+	return min(full, m.config.MaxWidth)
 }
 
 // jumpToVerse switches to the given verse's chapter and selects it.
