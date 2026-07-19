@@ -820,7 +820,7 @@ func (m model) View() string {
 			content.WriteString(m.centerText(header))
 			content.WriteString("\n\n")
 
-			versesAbove := 2
+			versesAbove := 1
 			versesBelow := 2
 
 			headerLines := 1
