@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -26,6 +27,8 @@ type model struct {
 	mode               mode
 	selected           int
 	scrollOffset       int
+	savedSelected      int // reading position stashed while in a menu
+	savedScroll        int
 	height             int
 	width              int
 	config             Config
@@ -51,6 +54,7 @@ type mode int
 const (
 	navigationMode mode = iota
 	searchMode
+	bookmarksMode
 )
 
 type AppState struct {
@@ -375,72 +379,60 @@ func (m *model) toggleBookmark() {
 	m.saveCurrentState()
 }
 
-// jumpToNextBookmark cycles to the next bookmark in biblical order,
-// wrapping past the current position.
-func (m *model) jumpToNextBookmark() {
-	if len(m.bookmarks) == 0 {
-		m.statusMsg = "No bookmarks"
-		return
+// bookmarkVerses materializes bookmarks into full verses (text from the
+// current translation), sorted in biblical order for the menu.
+func (m model) bookmarkVerses() []Verse {
+	bd := m.getBibleData()
+	order := bd.GetBooks()
+	rank := func(b string) int {
+		for i, x := range order {
+			if x == b {
+				return i
+			}
+		}
+		return len(order)
 	}
-	order := m.getBibleData().GetBooks()
-	rank := func(book string, chapter, verse int) [3]int {
-		bi := len(order)
-		for i, b := range order {
-			if b == book {
-				bi = i
+	bms := append([]Bookmark(nil), m.bookmarks...)
+	sort.Slice(bms, func(i, j int) bool {
+		a, b := bms[i], bms[j]
+		if ra, rb := rank(a.Book), rank(b.Book); ra != rb {
+			return ra < rb
+		}
+		if a.Chapter != b.Chapter {
+			return a.Chapter < b.Chapter
+		}
+		return a.Verse < b.Verse
+	})
+	out := make([]Verse, 0, len(bms))
+	for _, bm := range bms {
+		text := ""
+		for _, v := range bd.GetVerses(bm.Book, bm.Chapter) {
+			if v.Verse == bm.Verse {
+				text = v.Text
 				break
 			}
 		}
-		return [3]int{bi, chapter, verse}
+		out = append(out, Verse{Book: bm.Book, Chapter: bm.Chapter, Verse: bm.Verse, Text: text})
 	}
-	less := func(a, b [3]int) bool {
-		for i := 0; i < 3; i++ {
-			if a[i] != b[i] {
-				return a[i] < b[i]
-			}
-		}
-		return false
-	}
-
-	cur := rank(m.currentBook, m.currentChapter, m.currentVerseNum())
-	var best *Bookmark
-	var bestRank [3]int
-	var first *Bookmark
-	var firstRank [3]int
-	for i := range m.bookmarks {
-		bm := &m.bookmarks[i]
-		r := rank(bm.Book, bm.Chapter, bm.Verse)
-		if first == nil || less(r, firstRank) {
-			first, firstRank = bm, r
-		}
-		if less(cur, r) && (best == nil || less(r, bestRank)) {
-			best, bestRank = bm, r
-		}
-	}
-	target := best // next after current
-	if target == nil {
-		target = first // wrap to earliest
-	}
-	m.jumpToVerse(Verse{Book: target.Book, Chapter: target.Chapter, Verse: target.Verse})
-	m.statusMsg = fmt.Sprintf("Bookmark %s %d:%d", target.Book, target.Chapter, target.Verse)
-}
-
-func (m model) currentVerseNum() int {
-	if m.selected < len(m.verses) {
-		return m.verses[m.selected].Verse
-	}
-	return 0
+	return out
 }
 
 // yankVerse copies the selected verse (reference + text) to the system
 // clipboard via OSC52, which works over SSH and inside tmux.
 func (m *model) yankVerse() tea.Cmd {
 	var v Verse
-	if m.mode == searchMode && m.selected < len(m.searchResults) {
+	switch {
+	case m.mode == searchMode && m.selected < len(m.searchResults):
 		v = m.searchResults[m.selected]
-	} else if m.selected < len(m.verses) {
+	case m.mode == bookmarksMode:
+		if bms := m.bookmarkVerses(); m.selected < len(bms) {
+			v = bms[m.selected]
+		} else {
+			return nil
+		}
+	case m.selected < len(m.verses):
 		v = m.verses[m.selected]
-	} else {
+	default:
 		return nil
 	}
 	text := fmt.Sprintf("%s %d:%d (%s) %s", v.Book, v.Chapter, v.Verse, m.currentTranslation, v.Text)
@@ -533,10 +525,12 @@ func (m *model) moveDown(listLen int) {
 }
 
 func (m *model) getActiveList() (int, bool) {
-	if m.mode == searchMode && len(m.searchResults) > 0 {
+	switch {
+	case m.mode == searchMode && len(m.searchResults) > 0:
 		return len(m.searchResults), true
-	}
-	if m.mode == navigationMode {
+	case m.mode == bookmarksMode:
+		return len(m.bookmarks), true
+	case m.mode == navigationMode:
 		return len(m.verses), true
 	}
 	return 0, false
@@ -605,6 +599,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchResults = nil
 				return m, nil
 			}
+			if m.mode == bookmarksMode {
+				m.mode = navigationMode
+				m.selected = min(m.savedSelected, max(0, len(m.verses)-1))
+				m.scrollOffset = m.savedScroll
+				return m, nil
+			}
 			m.saveCurrentState()
 			return m, tea.Quit
 
@@ -620,6 +620,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					result := m.searchResults[m.selected]
 					m.mode = navigationMode
 					m.jumpToVerse(result)
+				}
+			} else if m.mode == bookmarksMode {
+				bms := m.bookmarkVerses()
+				if m.selected < len(bms) {
+					m.mode = navigationMode
+					m.jumpToVerse(bms[m.selected])
 				}
 			}
 
@@ -664,7 +670,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.scrollOffset = 0
 					}
 				case 'g':
-					if m.mode == navigationMode || (m.mode == searchMode && len(m.searchResults) > 0) {
+					if _, ok := m.getActiveList(); ok {
 						if m.selected > 0 {
 							m.selected = 0
 							m.scrollOffset = 0
@@ -749,7 +755,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.toggleBookmark()
 				case '\'':
 					if m.mode == navigationMode {
-						m.jumpToNextBookmark()
+						m.savedSelected = m.selected
+						m.savedScroll = m.scrollOffset
+						m.mode = bookmarksMode
+						m.selected = 0
+						m.scrollOffset = 0
+					}
+				case 'd':
+					if m.mode == bookmarksMode {
+						bms := m.bookmarkVerses()
+						if m.selected < len(bms) {
+							t := bms[m.selected]
+							if i := m.bookmarkIndex(t.Book, t.Chapter, t.Verse); i >= 0 {
+								m.bookmarks = append(m.bookmarks[:i], m.bookmarks[i+1:]...)
+								m.saveCurrentState()
+							}
+							if m.selected >= len(m.bookmarks) && m.selected > 0 {
+								m.selected--
+							}
+						}
 					}
 				case 'n':
 					if m.mode == navigationMode && len(m.searchResults) > 0 {
@@ -805,13 +829,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	var content strings.Builder
 
-	helpText := "j/k: Navigate • h/l: Chapter • b/w: Book • t/T: Translation • /: Search • n/N: Matches • m: Bookmark • ': Jump • y: Copy • z: Zen • q: Quit"
-	if m.mode == searchMode {
-		if len(m.searchResults) > 0 {
-			helpText = "j/k: Navigate • g/G: Top/Bottom • Ctrl+d/u: Half page • Enter: Select • y: Copy • /: New search • Esc: Back"
-		} else {
-			helpText = "Type to search • Enter: Execute • Esc: Back"
-		}
+	helpText := "hjkl: Navigate • b/w: Book • t/T: Translation • /: Search • n/N: Matches • m: Mark • ': Bookmarks • y: Copy • z: Zen • q: Quit"
+	switch {
+	case m.mode == searchMode && len(m.searchResults) > 0:
+		helpText = "j/k: Navigate • Enter: Select • y: Copy • /: New search • Esc: Back"
+	case m.mode == searchMode:
+		helpText = "Type to search • Enter: Execute • Esc: Back"
+	case m.mode == bookmarksMode:
+		helpText = "j/k: Navigate • Enter: Open • d: Delete • y: Copy • Esc: Back"
 	}
 
 	if m.mode == navigationMode {
@@ -906,60 +931,25 @@ func (m model) View() string {
 
 			m.writeFooter(&content, helpText)
 		}
+	} else if m.mode == bookmarksMode {
+		bms := m.bookmarkVerses()
+		if len(bms) == 0 {
+			content.WriteString(m.centerText(m.bookStyle.Render("Bookmarks")))
+			content.WriteString("\n\n")
+			content.WriteString(m.centerText("No bookmarks yet — press m on a verse to add one."))
+			if r := m.height - 3; r > 0 {
+				content.WriteString(strings.Repeat("\n", r))
+			}
+			m.writeFooter(&content, helpText)
+		} else {
+			m.clampSelectedIndex(len(bms))
+			m.renderList(&content, bms, fmt.Sprintf("Bookmarks (%d)", len(bms)), helpText)
+		}
 	} else {
 		if len(m.searchResults) > 0 {
-			header := m.bookStyle.Render(fmt.Sprintf("Search: %s (%d results)", m.searchQuery, len(m.searchResults)))
-			content.WriteString(m.centerText(header))
-			content.WriteString("\n\n")
-
-			availableHeight := m.height - 6
-
-			if availableHeight < 5 {
-				availableHeight = 5
-			}
-
 			m.clampSelectedIndex(len(m.searchResults))
-
-			_, visibleCount := m.calculateVisibleSearchResults(availableHeight)
-
-			if m.selected >= m.scrollOffset+visibleCount {
-				m.scrollOffset = m.selected
-				testHeight := m.calculateSearchResultHeight(m.searchResults[m.selected])
-
-				for m.scrollOffset > 0 && testHeight < availableHeight {
-					prevHeight := m.calculateSearchResultHeight(m.searchResults[m.scrollOffset-1])
-					if testHeight+prevHeight <= availableHeight {
-						m.scrollOffset--
-						testHeight += prevHeight
-					} else {
-						break
-					}
-				}
-
-				_, visibleCount = m.calculateVisibleSearchResults(availableHeight)
-			}
-
-			if m.selected < m.scrollOffset {
-				m.scrollOffset = m.selected
-				_, visibleCount = m.calculateVisibleSearchResults(availableHeight)
-			}
-
-			end := min(len(m.searchResults), m.scrollOffset+visibleCount)
-
-			linesUsed := 3
-			for i := m.scrollOffset; i < end; i++ {
-				result := m.searchResults[i]
-				reference := truncateText(fmt.Sprintf("%s %d:%d", result.Book, result.Chapter, result.Verse), 20)
-				verseNumStr := m.verseNumStyle.Render(fmt.Sprintf("%-20s", reference))
-				linesUsed += m.renderVerse(&content, result, i == m.selected, verseNumStr, searchTextPadding)
-			}
-
-			remainingLines := m.height - linesUsed
-			if remainingLines > 0 {
-				content.WriteString(strings.Repeat("\n", remainingLines))
-			}
-
-			m.writeFooter(&content, helpText)
+			m.renderList(&content, m.searchResults,
+				fmt.Sprintf("Search: %s (%d results)", m.searchQuery, len(m.searchResults)), helpText)
 		} else {
 			header := m.bookStyle.Render(fmt.Sprintf("Search: %s", m.searchQuery))
 			content.WriteString(m.centerText(header))
@@ -997,7 +987,8 @@ func (m model) writeFooter(content *strings.Builder, helpText string) {
 }
 
 func (m model) navHeader() string {
-	h := fmt.Sprintf("%s %s · c%d", m.currentTranslation, m.currentBook, m.currentChapter)
+	totalCh := len(m.getBibleData().chapterIndex[m.currentBook])
+	h := fmt.Sprintf("%s %s · c%d/%d", m.currentTranslation, m.currentBook, m.currentChapter, totalCh)
 	if m.selected < len(m.verses) {
 		h += fmt.Sprintf(" · v%d/%d", m.selected+1, len(m.verses))
 		if v := m.verses[m.selected]; m.bookmarkIndex(v.Book, v.Chapter, v.Verse) >= 0 {
@@ -1138,9 +1129,9 @@ func (m model) renderVerse(content *strings.Builder, verse Verse, isSelected boo
 	return linesUsed + 1
 }
 
-func (m *model) calculateVisibleSearchResults(availableHeight int) (linesUsed, visibleCount int) {
-	for i := m.scrollOffset; i < len(m.searchResults) && linesUsed < availableHeight; i++ {
-		resultHeight := m.calculateSearchResultHeight(m.searchResults[i])
+func (m *model) calculateVisibleResults(results []Verse, availableHeight int) (linesUsed, visibleCount int) {
+	for i := m.scrollOffset; i < len(results) && linesUsed < availableHeight; i++ {
+		resultHeight := m.calculateSearchResultHeight(results[i])
 		if linesUsed+resultHeight <= availableHeight {
 			linesUsed += resultHeight
 			visibleCount++
@@ -1149,6 +1140,49 @@ func (m *model) calculateVisibleSearchResults(availableHeight int) (linesUsed, v
 		}
 	}
 	return
+}
+
+// renderList draws a scrollable, variable-height list of verses (used for
+// both search results and the bookmarks menu).
+func (m *model) renderList(content *strings.Builder, results []Verse, header, helpText string) {
+	content.WriteString(m.centerText(m.bookStyle.Render(header)))
+	content.WriteString("\n\n")
+
+	availableHeight := max(5, m.height-6)
+	_, visibleCount := m.calculateVisibleResults(results, availableHeight)
+
+	if m.selected >= m.scrollOffset+visibleCount {
+		m.scrollOffset = m.selected
+		testHeight := m.calculateSearchResultHeight(results[m.selected])
+		for m.scrollOffset > 0 {
+			prevHeight := m.calculateSearchResultHeight(results[m.scrollOffset-1])
+			if testHeight+prevHeight <= availableHeight {
+				m.scrollOffset--
+				testHeight += prevHeight
+			} else {
+				break
+			}
+		}
+		_, visibleCount = m.calculateVisibleResults(results, availableHeight)
+	}
+	if m.selected < m.scrollOffset {
+		m.scrollOffset = m.selected
+		_, visibleCount = m.calculateVisibleResults(results, availableHeight)
+	}
+
+	end := min(len(results), m.scrollOffset+visibleCount)
+	linesUsed := 3
+	for i := m.scrollOffset; i < end; i++ {
+		r := results[i]
+		reference := truncateText(fmt.Sprintf("%s %d:%d", r.Book, r.Chapter, r.Verse), 20)
+		verseNumStr := m.verseNumStyle.Render(fmt.Sprintf("%-20s", reference))
+		linesUsed += m.renderVerse(content, r, i == m.selected, verseNumStr, searchTextPadding)
+	}
+
+	if remaining := m.height - linesUsed; remaining > 0 {
+		content.WriteString(strings.Repeat("\n", remaining))
+	}
+	m.writeFooter(content, helpText)
 }
 
 func truncateText(text string, maxLen int) string {

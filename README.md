@@ -66,8 +66,12 @@ The JSON structure should be:
 
 **Features:**
 - `/`: Search (see Search Features below)
+- `n/N`: Step to the next/previous search match in reading context
+- `m`: Bookmark (toggle) the current verse
+- `'`: Open the bookmarks menu (`Enter` opens, `d` deletes, `Esc` closes)
+- `y`: Copy the current verse (reference + text) to the clipboard
 - `z`: Toggle zen mode (distraction-free reading with centered text)
-- `q` or `Esc`: Quit (Esc exits search mode if active)
+- `q` or `Esc`: Quit (Esc backs out of search/bookmarks first)
 
 ### Search Features
 
