@@ -28,6 +28,14 @@ Configuration can be customized by editing `~/.config/bible-go/config.json`. The
 - `textColor`: Hex color for verse text content
 - `dimColor`: Hex color for dimmed verses in zen mode
 
+Alternatively, set `"theme"` to a built-in palette: `catppuccin-mocha` (default), `catppuccin-latte`, `gruvbox`, `nord`, `dracula`, `everforest`, `tokyonight`. Any explicitly set color overrides the theme:
+```json
+{
+  "theme": "everforest",
+  "dimColor": "#3d484d"
+}
+```
+
 **Note**: Bible translation files are not included in this repository due to copyright restrictions. You can obtain them from [jadenzaleski/bible-translations](https://github.com/jadenzaleski/bible-translations) and place them in `~/.config/bible-go/translations/`.
 
 **Performance Note**: The app uses lazy loading - only the current translation is loaded at startup for fast startup times. Other translations are loaded on-demand when you switch to them.
