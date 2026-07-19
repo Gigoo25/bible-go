@@ -1233,8 +1233,15 @@ func (m model) renderVerseZen(content *strings.Builder, verse Verse, isSelected 
 		style = m.dimStyle
 	}
 
-	for _, rawLine := range verseLines {
+	// Mark bookmarked verses with the same accent star used in the header.
+	bookmarked := m.bookmarkIndex(verse.Book, verse.Chapter, verse.Verse) >= 0
+	markStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.HighlightColor)).Bold(true)
+
+	for idx, rawLine := range verseLines {
 		line := style.Render(rawLine)
+		if idx == 0 && bookmarked {
+			line = markStyle.Render("★ ") + line
+		}
 		visualWidth := lipgloss.Width(line)
 		if visualWidth < m.width {
 			leftPadding := (m.width - visualWidth) / 2
