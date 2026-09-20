@@ -36,6 +36,9 @@ type model struct {
 	verseNumStyle      lipgloss.Style
 	textStyle          lipgloss.Style
 	dimStyle           lipgloss.Style
+	markStyle          lipgloss.Style
+	footerStyle        lipgloss.Style
+	bookmarkSet        map[Bookmark]bool
 	zenMode            bool
 }
 
@@ -133,13 +136,12 @@ func saveState(state AppState) error {
 	return saveJSON(stateFile, state)
 }
 
-func loadState() (AppState, error) {
+func loadState() AppState {
 	var state AppState
-	err := loadJSON(stateFile, &state)
-	if err != nil || state.CurrentTranslation == "" {
-		return getDefaultAppState(), nil
+	if err := loadJSON(stateFile, &state); err != nil || state.CurrentTranslation == "" {
+		return getDefaultAppState()
 	}
-	return state, nil
+	return state
 }
 
 func saveConfig(config Config) error {
@@ -192,16 +194,6 @@ func getDefaultConfig() Config {
 	return themes["catppuccin-mocha"]
 }
 
-var (
-	verseStyle = lipgloss.NewStyle().
-			MarginBottom(2)
-
-	helpStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("244")).
-			MarginTop(1).
-			PaddingLeft(1)
-)
-
 func initialModel() tea.Model {
 	multiBibleData, err := NewMultiBibleData()
 	if err != nil {
@@ -210,11 +202,7 @@ func initialModel() tea.Model {
 		os.Exit(1)
 	}
 
-	savedState, err := loadState()
-	if err != nil {
-		savedState = getDefaultAppState()
-		savedState.CurrentBook = "Genesis"
-	}
+	savedState := loadState()
 
 	config, err := loadConfig()
 	if err != nil {
@@ -242,11 +230,29 @@ func initialModel() tea.Model {
 		savedState.CurrentChapter = 1
 	}
 
+	// Recover from a stale or invalid saved chapter (e.g. state written
+	// with another translation) instead of showing an empty chapter.
+	chapters := bibleData.chapterIndex[savedState.CurrentBook]
+	if _, ok := chapters[savedState.CurrentChapter]; !ok {
+		if len(chapters) == 0 {
+			savedState.CurrentChapter = 1
+		} else {
+			savedState.CurrentChapter = nearestChapter(chapters, savedState.CurrentChapter)
+		}
+		savedState.Selected = 0
+		savedState.ScrollOffset = 0
+	}
+
 	verses := bibleData.GetVerses(savedState.CurrentBook, savedState.CurrentChapter)
 
 	if savedState.Selected >= len(verses) {
 		savedState.Selected = 0
 		savedState.ScrollOffset = 0
+	}
+
+	bookmarkSet := make(map[Bookmark]bool, len(savedState.Bookmarks))
+	for _, b := range savedState.Bookmarks {
+		bookmarkSet[b] = true
 	}
 
 	return model{
@@ -265,6 +271,9 @@ func initialModel() tea.Model {
 		verseNumStyle:      lipgloss.NewStyle().Foreground(lipgloss.Color(config.VerseNumColor)).Bold(true),
 		textStyle:          lipgloss.NewStyle().Foreground(lipgloss.Color(config.TextColor)),
 		dimStyle:           lipgloss.NewStyle().Foreground(lipgloss.Color(config.DimColor)),
+		markStyle:          lipgloss.NewStyle().Foreground(lipgloss.Color(config.HighlightColor)).Bold(true),
+		footerStyle:        lipgloss.NewStyle().Foreground(lipgloss.Color(config.VerseNumColor)),
+		bookmarkSet:        bookmarkSet,
 		zenMode:            savedState.ZenMode,
 		bookmarks:          savedState.Bookmarks,
 	}
@@ -363,17 +372,41 @@ func (m *model) bookmarkIndex(book string, chapter, verse int) int {
 	return -1
 }
 
+func (m model) isBookmarked(v Verse) bool {
+	return m.bookmarkSet[Bookmark{Book: v.Book, Chapter: v.Chapter, Verse: v.Verse}]
+}
+
+// nearestChapter returns the chapter of chapters closest to ch.
+func nearestChapter(chapters map[int][]Verse, ch int) int {
+	best, bestDist := 0, 0
+	for c := range chapters {
+		dist := c - ch
+		if dist < 0 {
+			dist = -dist
+		}
+		if best == 0 || dist < bestDist || (dist == bestDist && c < best) {
+			best, bestDist = c, dist
+		}
+	}
+	return best
+}
+
 // toggleBookmark adds or removes the current verse from bookmarks.
 func (m *model) toggleBookmark() {
 	if m.mode != navigationMode || m.selected >= len(m.verses) {
 		return
 	}
 	v := m.verses[m.selected]
-	if i := m.bookmarkIndex(v.Book, v.Chapter, v.Verse); i >= 0 {
-		m.bookmarks = append(m.bookmarks[:i], m.bookmarks[i+1:]...)
+	key := Bookmark{Book: v.Book, Chapter: v.Chapter, Verse: v.Verse}
+	if m.bookmarkSet[key] {
+		delete(m.bookmarkSet, key)
+		if i := m.bookmarkIndex(v.Book, v.Chapter, v.Verse); i >= 0 {
+			m.bookmarks = append(m.bookmarks[:i], m.bookmarks[i+1:]...)
+		}
 		m.statusMsg = fmt.Sprintf("Removed bookmark %s %d:%d", v.Book, v.Chapter, v.Verse)
 	} else {
-		m.bookmarks = append(m.bookmarks, Bookmark{Book: v.Book, Chapter: v.Chapter, Verse: v.Verse})
+		m.bookmarkSet[key] = true
+		m.bookmarks = append(m.bookmarks, key)
 		m.statusMsg = fmt.Sprintf("Bookmarked %s %d:%d", v.Book, v.Chapter, v.Verse)
 	}
 	m.saveCurrentState()
@@ -574,10 +607,11 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	prevBook, prevChapter, prevTranslation := m.currentBook, m.currentChapter, m.currentTranslation
-	// Persist position on chapter/book/translation change so it survives
-	// a killed terminal, not just a clean quit.
+	prevZen := m.zenMode
+	// Persist position and display mode on change so they survive a killed
+	// terminal, not just a clean quit.
 	defer func() {
-		if m.currentBook != prevBook || m.currentChapter != prevChapter || m.currentTranslation != prevTranslation {
+		if m.currentBook != prevBook || m.currentChapter != prevChapter || m.currentTranslation != prevTranslation || m.zenMode != prevZen {
 			m.saveCurrentState()
 		}
 	}()
@@ -592,7 +626,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		m.statusMsg = "" // transient; cleared on the next keypress
 		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyEsc:
+		case tea.KeyCtrlC:
+			m.saveCurrentState()
+			return m, tea.Quit
+		case tea.KeyEsc:
 			if m.mode == searchMode {
 				m.mode = navigationMode
 				m.searchQuery = ""
@@ -766,6 +803,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						bms := m.bookmarkVerses()
 						if m.selected < len(bms) {
 							t := bms[m.selected]
+							delete(m.bookmarkSet, Bookmark{Book: t.Book, Chapter: t.Chapter, Verse: t.Verse})
 							if i := m.bookmarkIndex(t.Book, t.Chapter, t.Verse); i >= 0 {
 								m.bookmarks = append(m.bookmarks[:i], m.bookmarks[i+1:]...)
 								m.saveCurrentState()
@@ -866,16 +904,28 @@ func (m model) View() string {
 
 			startIdx := m.selected - versesAbove
 			endIdx := m.selected + versesBelow + 1
+
+			// Wrap each verse once and reuse the lines for both height
+			// accounting and rendering.
+			type zenEntry struct {
+				valid bool
+				verse Verse
+				lines []string
+			}
+			entries := make([]zenEntry, 0, endIdx-startIdx)
 			verseLinesTotal := 0
 			for i := startIdx; i < endIdx; i++ {
-				if i < 0 || i >= len(m.verses) {
-					verseLinesTotal += 1
-				} else {
-					verseLinesTotal += max(1, len(wrapVerseText(m.verses[i].Text, zenTextWidth)))
+				entry := zenEntry{}
+				if i >= 0 && i < len(m.verses) {
+					entry.valid = true
+					entry.verse = m.verses[i]
+					entry.lines = wrapVerseText(entry.verse.Text, zenTextWidth)
 				}
+				verseLinesTotal += max(1, len(entry.lines))
 				if i < endIdx-1 {
-					verseLinesTotal += 1 // blank line between verses
+					verseLinesTotal++ // blank line between verses
 				}
+				entries = append(entries, entry)
 			}
 
 			availableHeight := m.height - headerLines - headerSpacing - helpLines
@@ -886,22 +936,14 @@ func (m model) View() string {
 				content.WriteString("\n")
 			}
 
-			for i := startIdx; i < endIdx; i++ {
-				if i < 0 || i >= len(m.verses) {
-					content.WriteString("\n")
-					if i < endIdx-1 {
-						content.WriteString("\n")
-					}
+			for idx, entry := range entries {
+				if entry.valid {
+					m.renderVerseZen(&content, entry.verse, entry.lines, startIdx+idx == m.selected)
 				} else {
-					verse := m.verses[i]
-					verseNumStr := m.verseNumStyle.Render(fmt.Sprintf("%3d", verse.Verse))
-					paddingWidth := 6
-
-					m.renderVerseZen(&content, verse, i == m.selected, verseNumStr, paddingWidth)
-
-					if i < endIdx-1 {
-						content.WriteString("\n")
-					}
+					content.WriteString("\n")
+				}
+				if idx < len(entries)-1 {
+					content.WriteString("\n")
 				}
 			}
 
@@ -917,15 +959,26 @@ func (m model) View() string {
 			content.WriteString(m.centerText(header))
 			content.WriteString("\n\n")
 
-			visibleVerses := m.getVisibleVerses()
+			start := m.scrollOffset
+			wrapped, visibleVerses := m.wrappedVisibleVerses(start)
 			m.adjustScrollOffset(len(m.verses), visibleVerses)
+			if m.scrollOffset != start {
+				wrapped, visibleVerses = m.wrappedVisibleVerses(m.scrollOffset)
+			}
 			end := min(len(m.verses), m.scrollOffset+visibleVerses)
 
 			linesUsed := 3
 			for i := m.scrollOffset; i < end; i++ {
 				verse := m.verses[i]
+				marker := " "
+				switch {
+				case i == m.selected:
+					marker = m.markStyle.Render(">")
+				case m.isBookmarked(verse):
+					marker = m.markStyle.Render("*")
+				}
 				verseNumStr := m.verseNumStyle.Render(fmt.Sprintf("%3d", verse.Verse))
-				linesUsed += m.renderVerse(&content, verse, i == m.selected, verseNumStr, verseTextPadding)
+				linesUsed += m.renderVerse(&content, wrapped[i-m.scrollOffset], marker, verseNumStr, verseTextPadding)
 			}
 
 			remainingLines := m.height - linesUsed
@@ -986,7 +1039,7 @@ func (m model) writeFooter(content *strings.Builder, helpText string) {
 	if m.statusMsg != "" {
 		text = m.statusMsg
 	}
-	styled := lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.VerseNumColor)).Render(text)
+	styled := m.footerStyle.Render(text)
 	content.WriteString(m.centerText(styled))
 }
 
@@ -995,7 +1048,7 @@ func (m model) navHeader() string {
 	h := fmt.Sprintf("%s %s · c%d/%d", m.currentTranslation, m.currentBook, m.currentChapter, totalCh)
 	if m.selected < len(m.verses) {
 		h += fmt.Sprintf(" · v%d/%d", m.selected+1, len(m.verses))
-		if v := m.verses[m.selected]; m.bookmarkIndex(v.Book, v.Chapter, v.Verse) >= 0 {
+		if v := m.verses[m.selected]; m.isBookmarked(v) {
 			h += " ★"
 		}
 	}
@@ -1026,21 +1079,28 @@ func (m model) getVisibleVerses() int {
 		return available
 	}
 
-	availableHeight := max(5, m.height-6)
-	currentHeight := 0
-	visibleCount := 0
+	_, count := m.wrappedVisibleVerses(m.scrollOffset)
+	return max(1, count)
+}
 
-	for i := m.scrollOffset; i < len(m.verses) && currentHeight < availableHeight; i++ {
-		verseHeight := m.calculateVerseHeight(m.verses[i])
-		if currentHeight+verseHeight <= availableHeight {
-			currentHeight += verseHeight
-			visibleCount++
-		} else {
+// wrappedVisibleVerses wraps the verses starting at start that fit in the
+// reading pane. Returned lines align with m.verses[start:].
+func (m model) wrappedVisibleVerses(start int) ([][]string, int) {
+	availableHeight := max(5, m.height-6)
+	width := m.readingWidth(verseTextPadding)
+
+	var lines [][]string
+	height := 0
+	for i := start; i < len(m.verses); i++ {
+		wrapped := wrapVerseText(m.verses[i].Text, width)
+		verseHeight := max(2, len(wrapped)+1)
+		if height+verseHeight > availableHeight {
 			break
 		}
+		height += verseHeight
+		lines = append(lines, wrapped)
 	}
-
-	return max(1, visibleCount)
+	return lines, len(lines)
 }
 
 func (m model) calculateTextHeight(text string, paddingWidth int) int {
@@ -1051,10 +1111,6 @@ const (
 	verseTextPadding  = 6
 	searchTextPadding = 23
 )
-
-func (m model) calculateVerseHeight(verse Verse) int {
-	return m.calculateTextHeight(verse.Text, verseTextPadding)
-}
 
 func (m model) calculateSearchResultHeight(result Verse) int {
 	return m.calculateTextHeight(result.Text, searchTextPadding)
@@ -1097,21 +1153,13 @@ func wrapVerseText(text string, maxWidth int) []string {
 	return lines
 }
 
-func (m model) renderVerse(content *strings.Builder, verse Verse, isSelected bool, verseNumStr string, paddingWidth int) int {
-	markStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.HighlightColor)).Bold(true)
-	switch {
-	case isSelected:
-		content.WriteString(markStyle.Render(">"))
-	case m.bookmarkIndex(verse.Book, verse.Chapter, verse.Verse) >= 0:
-		content.WriteString(markStyle.Render("*"))
-	default:
-		content.WriteString(" ")
-	}
+// renderVerse writes one verse from precomputed wrapped lines. marker is the
+// already-styled leading gutter (">", "*" or " ").
+func (m model) renderVerse(content *strings.Builder, verseLines []string, marker, verseNumStr string, paddingWidth int) int {
+	content.WriteString(marker)
 	content.WriteByte(' ')
 	content.WriteString(verseNumStr)
 	content.WriteByte(' ')
-
-	verseLines := wrapVerseText(verse.Text, m.readingWidth(paddingWidth))
 
 	if len(verseLines) > 0 {
 		content.WriteString(m.textStyle.Render(verseLines[0]))
@@ -1133,17 +1181,22 @@ func (m model) renderVerse(content *strings.Builder, verse Verse, isSelected boo
 	return linesUsed + 1
 }
 
-func (m *model) calculateVisibleResults(results []Verse, availableHeight int) (linesUsed, visibleCount int) {
-	for i := m.scrollOffset; i < len(results) && linesUsed < availableHeight; i++ {
-		resultHeight := m.calculateSearchResultHeight(results[i])
-		if linesUsed+resultHeight <= availableHeight {
-			linesUsed += resultHeight
-			visibleCount++
-		} else {
+// visibleResultLines wraps the results starting at start that fit in the
+// list pane. Returned lines align with results[start:].
+func (m model) visibleResultLines(results []Verse, start, availableHeight int) ([][]string, int) {
+	width := m.readingWidth(searchTextPadding)
+	var lines [][]string
+	linesUsed := 0
+	for i := start; i < len(results) && linesUsed < availableHeight; i++ {
+		wrapped := wrapVerseText(results[i].Text, width)
+		resultHeight := max(2, len(wrapped)+1)
+		if linesUsed+resultHeight > availableHeight {
 			break
 		}
+		linesUsed += resultHeight
+		lines = append(lines, wrapped)
 	}
-	return
+	return lines, len(lines)
 }
 
 // renderList draws a scrollable, variable-height list of verses (used for
@@ -1153,7 +1206,7 @@ func (m *model) renderList(content *strings.Builder, results []Verse, header, he
 	content.WriteString("\n\n")
 
 	availableHeight := max(5, m.height-6)
-	_, visibleCount := m.calculateVisibleResults(results, availableHeight)
+	wrapped, visibleCount := m.visibleResultLines(results, m.scrollOffset, availableHeight)
 
 	if m.selected >= m.scrollOffset+visibleCount {
 		m.scrollOffset = m.selected
@@ -1167,20 +1220,27 @@ func (m *model) renderList(content *strings.Builder, results []Verse, header, he
 				break
 			}
 		}
-		_, visibleCount = m.calculateVisibleResults(results, availableHeight)
+		wrapped, visibleCount = m.visibleResultLines(results, m.scrollOffset, availableHeight)
 	}
 	if m.selected < m.scrollOffset {
 		m.scrollOffset = m.selected
-		_, visibleCount = m.calculateVisibleResults(results, availableHeight)
+		wrapped, visibleCount = m.visibleResultLines(results, m.scrollOffset, availableHeight)
 	}
 
 	end := min(len(results), m.scrollOffset+visibleCount)
 	linesUsed := 3
 	for i := m.scrollOffset; i < end; i++ {
 		r := results[i]
+		marker := " "
+		switch {
+		case i == m.selected:
+			marker = m.markStyle.Render(">")
+		case m.isBookmarked(r):
+			marker = m.markStyle.Render("*")
+		}
 		reference := truncateText(fmt.Sprintf("%s %d:%d", r.Book, r.Chapter, r.Verse), 20)
 		verseNumStr := m.verseNumStyle.Render(fmt.Sprintf("%-20s", reference))
-		linesUsed += m.renderVerse(content, r, i == m.selected, verseNumStr, searchTextPadding)
+		linesUsed += m.renderVerse(content, wrapped[i-m.scrollOffset], marker, verseNumStr, searchTextPadding)
 	}
 
 	if remaining := m.height - linesUsed; remaining > 0 {
@@ -1208,39 +1268,25 @@ func (m model) centerText(text string) string {
 	return strings.Repeat(" ", leftPadding) + text
 }
 
-func (m model) renderVerseZen(content *strings.Builder, verse Verse, isSelected bool, verseNumStr string, paddingWidth int) {
-	// In zen mode we constrain the reading column so long verses don't
-	// run off-screen. We still center the rendered line(s) within the
-	// full terminal width.
-	const (
-		zenSideMargin   = 6
-		zenMaxTextWidth = 80
-	)
-
-	textWidth := max(20, m.width-(zenSideMargin*2))
-	textWidth = min(textWidth, zenMaxTextWidth)
-
-	verseLines := wrapVerseText(verse.Text, textWidth)
-
+// renderVerseZen writes a zen-mode verse from precomputed wrapped lines,
+// centered within the full terminal width.
+func (m model) renderVerseZen(content *strings.Builder, verse Verse, verseLines []string, isSelected bool) {
 	if len(verseLines) == 0 {
 		return
 	}
 
-	var style lipgloss.Style
+	style := m.dimStyle
 	if isSelected {
 		style = m.textStyle
-	} else {
-		style = m.dimStyle
 	}
 
 	// Mark bookmarked verses with the same accent star used in the header.
-	bookmarked := m.bookmarkIndex(verse.Book, verse.Chapter, verse.Verse) >= 0
-	markStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(m.config.HighlightColor)).Bold(true)
+	bookmarked := m.isBookmarked(verse)
 
 	for idx, rawLine := range verseLines {
 		line := style.Render(rawLine)
 		if idx == 0 && bookmarked {
-			line = markStyle.Render("★ ") + line
+			line = m.markStyle.Render("★ ") + line
 		}
 		visualWidth := lipgloss.Width(line)
 		if visualWidth < m.width {
