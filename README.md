@@ -41,7 +41,7 @@ Alternatively, set `"theme"` to a built-in palette: `catppuccin-mocha` (default)
 
 **Performance Note**: The app uses lazy loading - only the current translation is loaded at startup for fast startup times. Other translations are loaded on-demand when you switch to them.
 
-Supported translations are dynamically loaded from the available JSON files in `bible-data/`.
+Supported translations are dynamically loaded from the available JSON files in `~/.config/bible-go/translations/`.
 
 The JSON structure should be:
 ```json
@@ -72,7 +72,8 @@ The JSON structure should be:
 - `'`: Open the bookmarks menu (`Enter` opens, `d` deletes, `Esc` closes)
 - `y`: Copy the current verse (reference + text) to the clipboard
 - `z`: Toggle zen mode (distraction-free reading with centered text)
-- `q` or `Esc`: Quit (Esc backs out of search/bookmarks first)
+- `q` or `Ctrl+C`: Quit from any screen
+- `Esc`: Backs out of search/bookmarks first, then quits
 
 ### Search Features
 
@@ -82,6 +83,7 @@ Press `/` to enter search mode. The search supports multiple methods:
    - `Genesis 1` - Shows all verses in Genesis chapter 1
    - `John 3:16` - Shows John chapter 3, verse 16
    - `gen 1` - Partial book names work (shows Genesis 1)
+   - A chapter number is required: a bare book name like `John` is treated as a full-text search, not a reference
 
 2. **Full-Text Search:**
    - `faith hope love` - Finds verses containing all these words
@@ -101,7 +103,7 @@ Press `/` to enter search mode. The search supports multiple methods:
 
 Press `z` to toggle zen mode, which provides a distraction-free reading experience:
 - Centers the current verse on screen
-- Shows 2 verses above and below for context
+- Shows the previous verse and the next two for context
 - Dims surrounding verses to focus attention
 - Perfect for meditation and contemplative reading
 
