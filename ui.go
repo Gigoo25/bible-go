@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -155,29 +156,66 @@ func loadConfig() (Config, error) {
 		// First run: write defaults. On a parse error, keep the user's
 		// file intact and just run with defaults.
 		saveConfig(getDefaultConfig())
-		return getDefaultConfig(), nil
+		config = getDefaultConfig()
 	} else if err != nil {
-		return getDefaultConfig(), nil
+		config = getDefaultConfig()
+	} else {
+		// Theme provides the base palette; explicit colors override it.
+		base := getDefaultConfig()
+		if t, ok := themes[strings.ToLower(config.Theme)]; ok {
+			base = t
+		}
+		if config.HighlightColor == "" {
+			config.HighlightColor = base.HighlightColor
+		}
+		if config.VerseNumColor == "" {
+			config.VerseNumColor = base.VerseNumColor
+		}
+		if config.TextColor == "" {
+			config.TextColor = base.TextColor
+		}
+		if config.DimColor == "" {
+			config.DimColor = base.DimColor
+		}
 	}
-
-	// Theme provides the base palette; explicit colors override it.
-	base := getDefaultConfig()
-	if t, ok := themes[strings.ToLower(config.Theme)]; ok {
-		base = t
-	}
-	if config.HighlightColor == "" {
-		config.HighlightColor = base.HighlightColor
-	}
-	if config.VerseNumColor == "" {
-		config.VerseNumColor = base.VerseNumColor
-	}
-	if config.TextColor == "" {
-		config.TextColor = base.TextColor
-	}
-	if config.DimColor == "" {
-		config.DimColor = base.DimColor
-	}
+	// colors.json is applied last, after the returned config's only possible
+	// save above, so its values never end up written into config.json.
+	applyColorsFile(&config)
 	return config, nil
+}
+
+// colorsFile is an optional palette managed outside the app (e.g. generated
+// by a dotfiles setup from the desktop's colors). The app never writes it.
+const colorsFile = "colors.json"
+
+// colorOverrides are the colors.json fields. Each is optional and must be
+// "#rrggbb"; a missing or malformed one leaves the theme/config value alone.
+type colorOverrides struct {
+	HighlightColor string `json:"highlightColor"`
+	VerseNumColor  string `json:"verseNumColor"`
+	TextColor      string `json:"textColor"`
+	DimColor       string `json:"dimColor"`
+}
+
+var hexColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+
+// applyColorsFile overrides config's colors with colors.json, which wins over
+// both the theme and colors set in config.json. A missing or invalid file
+// changes nothing.
+func applyColorsFile(config *Config) {
+	var o colorOverrides
+	if err := loadJSON(colorsFile, &o); err != nil {
+		return
+	}
+	set := func(dst *string, v string) {
+		if hexColor.MatchString(v) {
+			*dst = v
+		}
+	}
+	set(&config.HighlightColor, o.HighlightColor)
+	set(&config.VerseNumColor, o.VerseNumColor)
+	set(&config.TextColor, o.TextColor)
+	set(&config.DimColor, o.DimColor)
 }
 
 func getDefaultAppState() AppState {
