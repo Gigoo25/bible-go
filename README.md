@@ -95,16 +95,18 @@ Press `/` to enter search mode. The search supports multiple methods:
 1. **Bible Reference Search:**
    - `Genesis 1` - Shows all verses in Genesis chapter 1
    - `John 3:16` - Shows John chapter 3, verse 16
+   - `John 3:16-18` - Shows a range of verses
    - `gen 1` - Partial book names work (shows Genesis 1)
    - A chapter number is required: a bare book name like `John` is treated as a full-text search, not a reference
 
 2. **Full-Text Search:**
-   - `faith hope love` - Finds verses containing all these words
+   - `faith hope love` - Finds verses containing all these words (matching inside words too: `love` finds "loved" and "beloved")
    - Results are ranked by relevance (exact phrase matches ranked higher)
 
 3. **Book-Scoped Search:**
    - `Romans grace` - Search for "grace" only in the book of Romans
    - Format: `<book name> <search term>`
+   - Only used when the whole query doesn't occur as a phrase, so `so loved` still finds John 3:16 rather than searching Song Of Solomon
 
 **Search Navigation:**
 - Type your query and press `Enter` to execute the search

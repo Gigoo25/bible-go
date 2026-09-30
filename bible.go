@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode"
 )
 
 type Bible map[string]map[string]map[string]string
@@ -23,9 +22,15 @@ type Verse struct {
 }
 
 type BibleData struct {
-	verses       []Verse
-	bookList     []string
-	index        map[string][]int
+	verses   []Verse
+	bookList []string
+	// bookLower holds bookList lowercased, index-aligned, for findBook.
+	bookLower []string
+	// chapterNums holds each book's chapter numbers in ascending order.
+	chapterNums map[string][]int
+	// bookVerses and chapterIndex are subslices of verses, so the text is
+	// stored once however it is looked up.
+	bookVerses   map[string][]Verse
 	chapterIndex map[string]map[int][]Verse
 }
 
@@ -53,8 +58,9 @@ func NewBibleData(jsonData []byte) (*BibleData, error) {
 	bd := &BibleData{
 		verses:       make([]Verse, 0, totalVerses),
 		bookList:     make([]string, 0, len(bible)),
-		index:        make(map[string][]int, 16384),
-		chapterIndex: make(map[string]map[int][]Verse),
+		chapterNums:  make(map[string][]int, len(bible)),
+		bookVerses:   make(map[string][]Verse, len(bible)),
+		chapterIndex: make(map[string]map[int][]Verse, len(bible)),
 	}
 
 	bookSet := make(map[string]bool, len(bible))
@@ -65,52 +71,68 @@ func NewBibleData(jsonData []byte) (*BibleData, error) {
 		}
 	}
 
+	// Books outside the canonical list keep a stable (sorted) order.
+	var extra []string
 	for bookName := range bible {
 		if !bookSet[bookName] {
-			bd.bookList = append(bd.bookList, bookName)
+			extra = append(extra, bookName)
 		}
 	}
+	sort.Strings(extra)
+	bd.bookList = append(bd.bookList, extra...)
 
-	var wordBuf []string
+	// Record index ranges first; subslices are taken once verses is complete.
+	type span struct{ start, end int }
+	chapterSpans := make(map[string]map[int]span, len(bible))
+	bookSpans := make(map[string]span, len(bible))
+
+	// Books without any verses are dropped so navigation never lands on one.
+	books := bd.bookList[:0]
 	for _, bookName := range bd.bookList {
-		chapters := sortMapKeysAsInts(bible[bookName])
+		bookStart := len(bd.verses)
+		spans := make(map[int]span)
+		var nums []int
 
-		for _, chapterNum := range chapters {
-			chapter := bible[bookName][strconv.Itoa(chapterNum)]
-			verses := sortMapKeysAsInts(chapter)
-
-			for _, verseNum := range verses {
-				text := chapter[strconv.Itoa(verseNum)]
-				// Lowercase once at load: both the index build and every
-				// search re-use it instead of re-lowercasing per query.
-				lower := strings.ToLower(text)
-
-				verseObj := Verse{
+		for _, ch := range sortedNumericKeys(bible[bookName]) {
+			chapterStart := len(bd.verses)
+			for _, v := range sortedNumericKeys(ch.value) {
+				bd.verses = append(bd.verses, Verse{
 					Book:      bookName,
-					Chapter:   chapterNum,
-					Verse:     verseNum,
-					Text:      text,
-					lowerText: lower,
-				}
-				bd.verses = append(bd.verses, verseObj)
-
-				if bd.chapterIndex[bookName] == nil {
-					bd.chapterIndex[bookName] = make(map[int][]Verse)
-				}
-				bd.chapterIndex[bookName][chapterNum] = append(bd.chapterIndex[bookName][chapterNum], verseObj)
-
-				verseIdx := len(bd.verses) - 1
-				wordBuf = splitFields(wordBuf[:0], lower)
-				for _, word := range wordBuf {
-					if cleanWord := cleanWord(word); len(cleanWord) > minWordLength {
-						// Dedupe: a word repeated in a verse gets one posting.
-						if postings := bd.index[cleanWord]; len(postings) == 0 || postings[len(postings)-1] != verseIdx {
-							bd.index[cleanWord] = append(postings, verseIdx)
-						}
-					}
-				}
+					Chapter:   ch.num,
+					Verse:     v.num,
+					Text:      v.value,
+					lowerText: strings.ToLower(v.value),
+				})
+			}
+			if len(bd.verses) > chapterStart {
+				spans[ch.num] = span{chapterStart, len(bd.verses)}
+				nums = append(nums, ch.num)
 			}
 		}
+
+		if len(nums) == 0 {
+			continue
+		}
+		books = append(books, bookName)
+		chapterSpans[bookName] = spans
+		bd.chapterNums[bookName] = nums
+		bookSpans[bookName] = span{bookStart, len(bd.verses)}
+	}
+	bd.bookList = books
+
+	for bookName, spans := range chapterSpans {
+		chapters := make(map[int][]Verse, len(spans))
+		for num, s := range spans {
+			chapters[num] = bd.verses[s.start:s.end:s.end]
+		}
+		bd.chapterIndex[bookName] = chapters
+		s := bookSpans[bookName]
+		bd.bookVerses[bookName] = bd.verses[s.start:s.end:s.end]
+	}
+
+	bd.bookLower = make([]string, len(bd.bookList))
+	for i, b := range bd.bookList {
+		bd.bookLower[i] = strings.ToLower(b)
 	}
 
 	return bd, nil
@@ -129,39 +151,23 @@ var biblicalOrder = []string{
 	"1 John", "2 John", "3 John", "Jude", "Revelation",
 }
 
-func sortMapKeysAsInts[T any](m map[string]T) []int {
-	numbers := make([]int, 0, len(m))
-	for key := range m {
+type numericKey[T any] struct {
+	num   int
+	value T
+}
+
+// sortedNumericKeys returns m's entries whose keys are integers, in
+// ascending numeric order. Values are carried along so keys like "01" are
+// never re-formatted and looked up again.
+func sortedNumericKeys[T any](m map[string]T) []numericKey[T] {
+	out := make([]numericKey[T], 0, len(m))
+	for key, value := range m {
 		if num, err := strconv.Atoi(key); err == nil {
-			numbers = append(numbers, num)
+			out = append(out, numericKey[T]{num, value})
 		}
 	}
-	sort.Ints(numbers)
-	return numbers
-}
-
-// splitFields appends the whitespace-separated words of s to dst, matching
-// the semantics of strings.Fields but reusing the caller's buffer.
-func splitFields(dst []string, s string) []string {
-	start := -1
-	for i, r := range s {
-		if unicode.IsSpace(r) {
-			if start >= 0 {
-				dst = append(dst, s[start:i])
-				start = -1
-			}
-		} else if start < 0 {
-			start = i
-		}
-	}
-	if start >= 0 {
-		dst = append(dst, s[start:])
-	}
-	return dst
-}
-
-func cleanWord(word string) string {
-	return strings.Trim(word, ".,;:!?\"'()[]")
+	slices.SortFunc(out, func(a, b numericKey[T]) int { return a.num - b.num })
+	return out
 }
 
 func getConfigDir() (string, error) {
@@ -205,20 +211,17 @@ func NewMultiBibleData() (*MultiBibleData, error) {
 		return nil, fmt.Errorf("failed to glob bible files: %w", err)
 	}
 
-	if len(files) == 0 {
-		return nil, fmt.Errorf("no bible JSON files found in %s (expected files like ESV_bible.json)", translationsDir)
-	}
-
 	for _, file := range files {
-		if strings.HasSuffix(file, "_bible.json") {
-			transName := strings.TrimSuffix(filepath.Base(file), "_bible.json")
-			mbd.filePaths[transName] = file
-			mbd.translationNames = append(mbd.translationNames, transName)
+		transName := strings.TrimSuffix(filepath.Base(file), "_bible.json")
+		if transName == "" {
+			continue
 		}
+		mbd.filePaths[transName] = file
+		mbd.translationNames = append(mbd.translationNames, transName)
 	}
 
 	if len(mbd.translationNames) == 0 {
-		return nil, fmt.Errorf("no valid bible translation files found")
+		return nil, fmt.Errorf("no bible JSON files found in %s (expected files like ESV_bible.json)", translationsDir)
 	}
 
 	sort.Strings(mbd.translationNames)
@@ -226,35 +229,44 @@ func NewMultiBibleData() (*MultiBibleData, error) {
 	return mbd, nil
 }
 
-func (mbd *MultiBibleData) GetCurrentBibleData(translation string) *BibleData {
+// Load returns the named translation, loading it on first use. It returns
+// nil if the translation is unknown or failed to load.
+func (mbd *MultiBibleData) Load(translation string) *BibleData {
 	if bd, exists := mbd.translations[translation]; exists {
 		return bd
 	}
+	filePath, exists := mbd.filePaths[translation]
+	if !exists || mbd.failed[translation] {
+		return nil
+	}
+	bd, err := loadTranslation(filePath)
+	if err != nil || len(bd.bookList) == 0 {
+		mbd.failed[translation] = true
+		return nil
+	}
+	mbd.translations[translation] = bd
+	mbd.lastGood = bd
+	return bd
+}
 
-	if !mbd.failed[translation] {
-		if filePath, exists := mbd.filePaths[translation]; exists {
-			if bd, err := mbd.loadTranslation(filePath); err == nil {
-				mbd.translations[translation] = bd
-				mbd.lastGood = bd
-				return bd
-			}
-			mbd.failed[translation] = true
+// FirstLoadable returns the first translation, in name order, that loads.
+func (mbd *MultiBibleData) FirstLoadable() (string, bool) {
+	for _, name := range mbd.translationNames {
+		if mbd.Load(name) != nil {
+			return name, true
 		}
 	}
+	return "", false
+}
 
-	// Fall back to the first translation, or to the last one that loaded.
-	if len(mbd.translationNames) > 0 {
-		fallback := mbd.translationNames[0]
-		if fallback != translation {
-			if bd := mbd.GetCurrentBibleData(fallback); bd != nil {
-				return bd
-			}
-		}
+func (mbd *MultiBibleData) GetCurrentBibleData(translation string) *BibleData {
+	if bd := mbd.Load(translation); bd != nil {
+		return bd
 	}
 	return mbd.lastGood
 }
 
-func (mbd *MultiBibleData) loadTranslation(filePath string) (*BibleData, error) {
+func loadTranslation(filePath string) (*BibleData, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
@@ -268,12 +280,12 @@ func (bd *BibleData) GetBooks() []string {
 }
 
 func (bd *BibleData) GetVerses(book string, chapter int) []Verse {
-	if chapters, ok := bd.chapterIndex[book]; ok {
-		if verses, ok := chapters[chapter]; ok {
-			return verses
-		}
-	}
-	return []Verse{}
+	return bd.chapterIndex[book][chapter]
+}
+
+// Chapters returns book's chapter numbers in ascending order.
+func (bd *BibleData) Chapters(book string) []int {
+	return bd.chapterNums[book]
 }
 
 type scoredVerse struct {
@@ -284,7 +296,7 @@ type scoredVerse struct {
 // fuzzyMatchAndScore ranks lowerText against queryLower (both lowercased).
 // Multi-word queries require every word; a contiguous phrase outranks the
 // same words appearing scattered. Lower score = better.
-func fuzzyMatchAndScore(lowerText, queryLower string) (matches bool, score int) {
+func fuzzyMatchAndScore(lowerText, queryLower string, words []string) (matches bool, score int) {
 	if queryLower == "" {
 		return true, noMatchScore
 	}
@@ -293,11 +305,6 @@ func fuzzyMatchAndScore(lowerText, queryLower string) (matches bool, score int) 
 		return true, idx
 	}
 
-	if !strings.ContainsAny(queryLower, " \t\n\v\f\r") {
-		return false, noMatchScore
-	}
-
-	words := strings.Fields(queryLower)
 	if len(words) < 2 {
 		return false, noMatchScore
 	}
@@ -314,27 +321,23 @@ func fuzzyMatchAndScore(lowerText, queryLower string) (matches bool, score int) 
 }
 
 const (
-	noMatchScore    = 1000000
-	wordMatchBase   = 100000 // scattered multi-word matches rank below phrase matches
-	minWordLength   = 2
-	minSearchLength = 2
+	noMatchScore  = 1000000
+	wordMatchBase = 100000 // scattered multi-word matches rank below phrase matches
 )
 
-func intersect(a, b []int) []int {
-	var result []int
-	i, j := 0, 0
-	for i < len(a) && j < len(b) {
-		if a[i] == b[j] {
-			result = append(result, a[i])
-			i++
-			j++
-		} else if a[i] < b[j] {
-			i++
-		} else {
-			j++
+// scoreVerses returns the verses matching queryLower, best first, and
+// whether any of them contains the query as a contiguous phrase.
+func scoreVerses(verses []Verse, queryLower string) ([]Verse, bool) {
+	words := strings.Fields(queryLower)
+	var matches []scoredVerse
+	phrase := false
+	for _, verse := range verses {
+		if match, score := fuzzyMatchAndScore(verse.lowerText, queryLower, words); match {
+			matches = append(matches, scoredVerse{verse: verse, score: score})
+			phrase = phrase || score < wordMatchBase
 		}
 	}
-	return result
+	return sortAndExtractVerses(matches), phrase
 }
 
 func sortAndExtractVerses(matches []scoredVerse) []Verse {
@@ -348,168 +351,85 @@ func sortAndExtractVerses(matches []scoredVerse) []Verse {
 	return verses
 }
 
+// findBook resolves a book name case-insensitively: an exact match wins,
+// otherwise the first book (in canonical order) with that prefix.
 func (bd *BibleData) findBook(bookName string) string {
-	bookNameLower := strings.ToLower(bookName)
+	bookNameLower := strings.ToLower(strings.TrimSpace(bookName))
+	if bookNameLower == "" {
+		return ""
+	}
 	prefixMatch := ""
-	for _, book := range bd.bookList {
-		bookLower := strings.ToLower(book)
+	for i, bookLower := range bd.bookLower {
 		if bookLower == bookNameLower {
-			return book
+			return bd.bookList[i]
 		}
 		if prefixMatch == "" && strings.HasPrefix(bookLower, bookNameLower) {
-			prefixMatch = book
+			prefixMatch = bd.bookList[i]
 		}
 	}
 	return prefixMatch
 }
 
+// Search resolves a reference ("John 3:16", "Psalm 23", "Rom 8:28-30")
+// or else runs a text search. A query ending in a word, like "John love",
+// is searched within that book, unless the whole query occurs as a phrase
+// somewhere ("so loved" must not become a search of Song Of Solomon).
 func (bd *BibleData) Search(query string) []Verse {
+	query = strings.TrimSpace(query)
 	if query == "" {
-		return []Verse{}
+		return nil
 	}
 
 	if referenceResults := bd.searchByReference(query); len(referenceResults) > 0 {
 		return referenceResults
 	}
 
-	parts := strings.Fields(query)
+	queryLower := strings.ToLower(query)
+	results, phrase := scoreVerses(bd.verses, queryLower)
+	if phrase {
+		return results
+	}
+
+	parts := strings.Fields(queryLower)
 	if len(parts) >= 2 {
 		bookName := strings.Join(parts[:len(parts)-1], " ")
-		searchTerm := parts[len(parts)-1]
-
 		if matchedBook := bd.findBook(bookName); matchedBook != "" {
-			results := bd.searchInBook(matchedBook, searchTerm)
-			if len(results) > 0 {
-				return results
+			if inBook, _ := scoreVerses(bd.bookVerses[matchedBook], parts[len(parts)-1]); len(inBook) > 0 {
+				return inBook
 			}
 		}
 	}
 
-	queryLower := strings.ToLower(query)
-	words := strings.Fields(queryLower)
-	if candidates, ok := bd.getCandidateIndices(words); ok {
-		return bd.scoreAndSortCandidates(candidates, queryLower)
-	}
-
-	return bd.fullTextSearch(queryLower)
+	return results
 }
 
-func (bd *BibleData) searchInBook(bookName, searchTerm string) []Verse {
-	chapters := bd.chapterIndex[bookName]
-	chapterNums := make([]int, 0, len(chapters))
-	for ch := range chapters {
-		chapterNums = append(chapterNums, ch)
-	}
-	sort.Ints(chapterNums)
-
-	searchLower := strings.ToLower(searchTerm)
-	var matches []scoredVerse
-	for _, ch := range chapterNums {
-		for _, verse := range chapters[ch] {
-			if match, score := fuzzyMatchAndScore(verse.lowerText, searchLower); match {
-				matches = append(matches, scoredVerse{verse: verse, score: score})
-			}
-		}
-	}
-	return sortAndExtractVerses(matches)
-}
-
-// getCandidateIndices intersects the posting lists for the query's indexed
-// words. ok=false means the index cannot be used (no indexable words, or a
-// word is missing from it), so the caller must fall back to a full scan.
-// A non-nil, empty result is a genuine empty intersection: no fallback is
-// needed because no verse can contain all the words.
-func (bd *BibleData) getCandidateIndices(words []string) ([]int, bool) {
-	var candidates []int
-	seeded := false
-	for _, word := range words {
-		clean := cleanWord(word)
-		if len(clean) <= minSearchLength {
-			continue
-		}
-		indices, ok := bd.index[clean]
-		if !ok {
-			return nil, false
-		}
-		if !seeded {
-			candidates = indices
-			seeded = true
-			continue
-		}
-		candidates = intersect(candidates, indices)
-	}
-	if !seeded {
-		return nil, false
-	}
-	if candidates == nil {
-		return []int{}, true
-	}
-	return candidates, true
-}
-
-func (bd *BibleData) scoreAndSortCandidates(candidates []int, queryLower string) []Verse {
-	matches := make([]scoredVerse, 0, len(candidates))
-	for _, idx := range candidates {
-		verse := bd.verses[idx]
-		if match, score := fuzzyMatchAndScore(verse.lowerText, queryLower); match {
-			matches = append(matches, scoredVerse{verse: verse, score: score})
-		}
-	}
-	return sortAndExtractVerses(matches)
-}
-
-func (bd *BibleData) fullTextSearch(queryLower string) []Verse {
-	var matches []scoredVerse
-	for _, verse := range bd.verses {
-		if match, score := fuzzyMatchAndScore(verse.lowerText, queryLower); match {
-			matches = append(matches, scoredVerse{verse: verse, score: score})
-		}
-	}
-	return sortAndExtractVerses(matches)
-}
-
+// searchByReference parses "Book Chapter", "Book Chapter:Verse" and
+// "Book Chapter:From-To". It returns nil for anything else.
 func (bd *BibleData) searchByReference(query string) []Verse {
-	query = strings.TrimSpace(query)
-
-	parts := strings.Split(query, ":")
-	var bookChapter string
-	var verseNum int
-
-	if len(parts) == 2 {
-		bookChapter = strings.TrimSpace(parts[0])
-		if num, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
-			verseNum = num
-		}
-	} else {
-		bookChapter = query
-		verseNum = -1
-	}
+	bookChapter, verseSpec, hasVerse := strings.Cut(query, ":")
 
 	words := strings.Fields(bookChapter)
-	if len(words) == 0 {
+	if len(words) < 2 {
 		return nil
 	}
-
-	var bookName string
-	var chapterNum int
-
-	lastWord := words[len(words)-1]
-	if num, err := strconv.Atoi(lastWord); err == nil && num > 0 {
-		chapterNum = num
-		bookName = strings.Join(words[:len(words)-1], " ")
-	} else {
-		bookName = strings.Join(words, " ")
-		chapterNum = -1
-	}
-
-	if bookName == "" {
+	chapterNum, err := strconv.Atoi(words[len(words)-1])
+	if err != nil || chapterNum <= 0 {
 		return nil
 	}
+	bookName := strings.Join(words[:len(words)-1], " ")
 
-	// A bare book name (no chapter or verse) is a search term, not a
-	// reference; returning the whole book here would shadow text search.
-	if chapterNum <= 0 && verseNum <= 0 {
-		return nil
+	verseFrom, verseTo := 0, 0 // 0 = whole chapter
+	if hasVerse {
+		from, to, isRange := strings.Cut(strings.TrimSpace(verseSpec), "-")
+		if verseFrom, err = strconv.Atoi(strings.TrimSpace(from)); err != nil || verseFrom <= 0 {
+			return nil
+		}
+		verseTo = verseFrom
+		if isRange {
+			if verseTo, err = strconv.Atoi(strings.TrimSpace(to)); err != nil || verseTo < verseFrom {
+				return nil
+			}
+		}
 	}
 
 	matchedBook := bd.findBook(bookName)
@@ -517,26 +437,15 @@ func (bd *BibleData) searchByReference(query string) []Verse {
 		return nil
 	}
 
-	var results []Verse
-
-	chapters := bd.chapterIndex[matchedBook]
-	chapterNums := make([]int, 0, len(chapters))
-	for ch := range chapters {
-		if chapterNum > 0 && ch != chapterNum {
-			continue
-		}
-		chapterNums = append(chapterNums, ch)
+	verses := bd.GetVerses(matchedBook, chapterNum)
+	if verseFrom == 0 {
+		return verses
 	}
-	sort.Ints(chapterNums)
-
-	for _, ch := range chapterNums {
-		for _, verse := range chapters[ch] {
-			if verseNum > 0 && verse.Verse != verseNum {
-				continue
-			}
+	var results []Verse
+	for _, verse := range verses {
+		if verse.Verse >= verseFrom && verse.Verse <= verseTo {
 			results = append(results, verse)
 		}
 	}
-
 	return results
 }
